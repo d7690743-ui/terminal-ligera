@@ -55,6 +55,16 @@ import java.util.zip.ZipInputStream
  * release con ella: el instalador nativo actualiza sin
  * desinstalar y el bootstrap se conserva.
  *
+ * 2.4: targetSdk 28 como Termux. En la 2.3 el 'instalar' ya
+ * funcionaba perfecto (1117 enlaces, SHA correcto), pero
+ * 'bash --version' seguía con Permission denied: Android 10+
+ * bloquea ejecutar binarios de la carpeta de datos de la app
+ * (W^X) cuando targetSdk >= 29, y la app tenía 35. Con 28 el
+ * bash se ejecuta directo. Además el fallback por linker ya
+ * no pasa por 'bash -c' (el bash cargado por el linker volvía
+ * a intentar ejecutar 'bash' y moría igual): para comandos
+ * simples corre el binario directo por el linker.
+ *
  * 1.0: solo /system/bin/sh de Android, sin instalar nada.
  * 2.0: comando `instalar` baja el bootstrap oficial de Termux
  * (aarch64, ~32 MB, SHA-256 verificado) y lo descomprime en la
@@ -352,7 +362,7 @@ class MainActivity : Activity() {
 
     private fun estadoTexto(): String {
         val sb = StringBuilder()
-        sb.append("Estado Terminal Ligera 2.3\n")
+        sb.append("Estado Terminal Ligera 2.4\n")
         sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
         sb.append("\n")
         sb.append("  carpeta: ${filesDir.absolutePath}\n")
@@ -595,6 +605,39 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Prueba si bash arranca DIRECTO (sin linker). Con targetSdk 28
+     * (2.4) debería funcionar; si no, el fallback es el linker. */
+    private fun probarBashDirecto(): String {
+        return try {
+            val bashPath = File(prefixDir, "bin/bash").absolutePath
+            val pb = ProcessBuilder(bashPath, "-c", "echo prueba-bash-ok")
+            pb.directory(filesDir)
+            pb.redirectErrorStream(true)
+            val env = pb.environment()
+            val prefix = prefixDir.absolutePath
+            env["HOME"] = filesDir.absolutePath
+            env["PREFIX"] = prefix
+            env["TMPDIR"] = "$prefix/tmp"
+            env["TERM"] = "xterm-256color"
+            env["LANG"] = "en_US.UTF-8"
+            env["PATH"] = "$prefix/bin:$prefix/bin/applets:/system/bin:/system/xbin"
+            env["LD_LIBRARY_PATH"] = "$prefix/lib"
+            val proc = pb.start()
+            val termino = proc.waitFor(15, TimeUnit.SECONDS)
+            if (!termino) {
+                proc.destroyForcibly()
+                return "  prueba bash (directo): NO arrancó (tiempo agotado)\n"
+            }
+            val salida = proc.inputStream.bufferedReader().readText().trim()
+            val codigo = proc.exitValue()
+            "  prueba bash (directo): " +
+                if (codigo == 0 && salida.contains("prueba-bash-ok")) "SÍ, bash corre\n"
+                else "NO (código $codigo): $salida\n"
+        } catch (e: Exception) {
+            "  prueba bash (directo): NO (${e.message})\n"
+        }
+    }
+
     /** Repara permisos y enlaces sin bajar el bootstrap otra vez. */
     private fun repararPermisosYEnlaces(): String {
         if (!prefixDir.exists()) return "[no hay bootstrap instalado. Corre 'instalar' primero.]\n"
@@ -606,6 +649,7 @@ class MainActivity : Activity() {
             "  enlace libreadline.so.8: " +
                 if (File(prefixDir, "lib/libreadline.so.8").exists()) "sí\n" else "NO\n"
         )
+        sb.append(probarBashDirecto())
         sb.append(probarBashPorLinker())
         val bashOk = File(prefixDir, "bin/bash").canExecute()
         sb.append(
@@ -638,22 +682,53 @@ class MainActivity : Activity() {
         return runShellWithTimeout(cmd, LONG_TIMEOUT_SECONDS, MAX_LONG_OUTPUT)
     }
 
+    /** Si el comando es simple (un binario + argumentos, sin
+     * tuberías, redirecciones ni otros metacaracteres del shell),
+     * resuelve el binario y devuelve el intento por linker directo:
+     * ['/system/bin/linker64', binario, args...]. Así el linker
+     * carga el binario y lo corre sin que un bash intermedio tenga
+     * que volver a ejecutarlo (eso era lo que moría en la 2.3). */
+    private fun intentoLinkerDirecto(cmd: String): List<String>? {
+        if (cmd.any { it in "|&;<>()$`"'*?#~\n" }) return null
+        val partes = cmd.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        if (partes.isEmpty()) return null
+        val nombre = partes[0]
+        val candidatos = if (nombre.contains("/")) {
+            listOf(File(nombre))
+        } else {
+            listOf(
+                File(prefixDir, "bin/$nombre"),
+                File(prefixDir, "bin/applets/$nombre"),
+                File("/system/bin/$nombre"),
+                File("/system/xbin/$nombre")
+            )
+        }
+        val bin = candidatos.firstOrNull { it.isFile } ?: return null
+        return listOf("/system/bin/linker64", bin.absolutePath) + partes.drop(1)
+    }
+
     private fun runShellWithTimeout(cmd: String, timeoutSeconds: Long, maxChars: Int): String {
         return try {
             val bootstrap = isBootstrapInstalled()
             val bashPath = File(prefixDir, "bin/bash").absolutePath
-            // Candidatos de shell, en orden. En la 2.0 solo se intentaba
-            // el bash del bootstrap y si fallaba con permiso denegado
-            // (error 13) todo el comando moría. Ahora se cae al linker
-            // del sistema (que lee el binario en vez de ejecutarlo, y
-            // funciona aunque el archivo no tenga permiso de ejecución)
-            // y luego al sh de Android, y se avisa cuál se usó.
+            // Candidatos, en orden. En la 2.4 el primero ya debería
+            // funcionar: targetSdk 28 permite ejecutar binarios de
+            // la carpeta de datos (con 35 Android lo bloqueaba).
+            // El linker de la 2.3 fallaba porque hacía
+            // 'linker64 bash -c "bash --version"': el bash cargado
+            // por el linker volvía a ejecutar 'bash' y moría igual
+            // con Permission denied. Ahora, para comandos simples
+            // (un binario + argumentos, sin | ; & < > etc.), el
+            // linker corre el binario DIRECTO: 'linker64 curl
+            // --version'. Para comandos compuestos se mantiene el
+            // 'linker64 bash -c' como último recurso antes de sh.
             val intentos: List<List<String>> = if (bootstrap) {
-                listOf(
-                    listOf(bashPath, "-c", cmd),
-                    listOf("/system/bin/linker64", bashPath, "-c", cmd),
-                    listOf("/system/bin/sh", "-c", cmd)
-                )
+                val lista = mutableListOf<List<String>>()
+                lista.add(listOf(bashPath, "-c", cmd))
+                intentoLinkerDirecto(cmd)?.let { lista.add(it) }
+                lista.add(listOf("/system/bin/linker64", bashPath, "-c", cmd))
+                lista.add(listOf("/system/bin/sh", "-c", cmd))
+                lista
             } else {
                 listOf(listOf("/system/bin/sh", "-c", cmd))
             }
@@ -795,7 +870,7 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 2.3 — por Nexos
+Terminal Ligera 2.4 — por Nexos
 Escribe 'help' para ver los comandos.
 Sin bootstrap, corre solo los comandos de Android.
 Con 'instalar' baja el bootstrap de Termux
@@ -820,6 +895,14 @@ Comandos propios de esta app:
   estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
+
+NUEVO en 2.4 — bash ya corre (targetSdk 28, como Termux):
+  En la 2.3 el bootstrap ya se instalaba bien, pero Android
+  bloqueaba ejecutar bash (W^X, targetSdk 35). Ahora la app
+  es targetSdk 28, como Termux, y el bash se ejecuta directo.
+  Si tu teléfono igual lo bloquea, los comandos simples
+  (bash, curl, git, pkg...) se corren por el linker del
+  sistema sin pasar por bash.
 
 NUEVO en 2.3 — firma estable, se actualiza solo:
   El APK ya se instala con el instalador normal de
@@ -865,7 +948,7 @@ Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 2.3
+Terminal Ligera 2.4
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
 Sin bootstrap: corre /system/bin/sh como usuario

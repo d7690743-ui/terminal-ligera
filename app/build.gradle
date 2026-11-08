@@ -10,9 +10,15 @@ android {
     defaultConfig {
         applicationId 'com.nexos.terminal'
         minSdk 24
-        targetSdk 35
-        versionCode 5
-        versionName '2.3'
+        // targetSdk 28 como Termux (2.4): Android 10+ (API 29)
+        // bloquea que una app ejecute binarios de su propia
+        // carpeta de datos (W^X) cuando targetSdk >= 29. Con 28
+        // el bash del bootstrap sí se puede ejecutar directo.
+        // compileSdk sigue en 35. No afecta a la instalación
+        // por sideload (el piso de Android 14 es targetSdk 23).
+        targetSdk 28
+        versionCode 6
+        versionName '2.4'
     }
 
     // Firma estable: una sola llave para todos los builds (2.3).

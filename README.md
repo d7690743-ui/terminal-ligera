@@ -18,6 +18,33 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.4 — bash ya corre: targetSdk 28 como Termux
+
+En la 2.3 el `instalar` ya funcionaba perfecto en el teléfono
+(SHA-256 correcto, 3,480 archivos, 1,117 enlaces creados, 444
+archivos con 0755), pero `bash --version` y `curl --version`
+seguían con Permission denied. Causa verificada: Android 10+
+(API 29) bloquea que una app ejecute binarios de su propia
+carpeta de datos (W^X, política SELinux) cuando targetSdk >= 29,
+y la app tenía targetSdk 35. Termux lo resuelve con targetSdk 28.
+
+Cambios en la 2.4 (versionCode 6):
+- `targetSdk 28` en app/build.gradle (compileSdk sigue en 35,
+  minSdk 24). Es la misma técnica de Termux; no afecta a la
+  instalación por sideload (el piso de Android 14 es targetSdk 23).
+- El fallback por linker ya no pasa por `bash -c`: en la 2.3 el
+  bash cargado por el linker volvía a intentar ejecutar `bash`
+  y moría con el mismo Permission denied. Ahora los comandos
+  simples (bash, curl, git, pkg...) se corren con el binario
+  directo por el linker (`linker64 <binario> <args>`).
+- `reparar` ahora prueba bash directo ADEMÁS de por el linker,
+  para confirmar en el teléfono que el fix funcionó.
+
+Para probar tras instalar: `reparar` (debe decir "prueba bash
+(directo): SÍ, bash corre"), luego `bash --version`,
+`curl --version`, `pkg-instalar git`, `git --version`,
+`muse-instalar`.
+
 ## 2.3 — firma estable: se instala y actualiza normal
 
 Cada build de Actions salía con un certificado distinto (cada
@@ -188,6 +215,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.3: firma estable + build release"
+git commit -m "Terminal Ligera 2.4: targetSdk 28 + linker directo"
 git push origin main
 ```

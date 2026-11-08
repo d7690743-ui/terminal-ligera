@@ -58,6 +58,11 @@ android {
     kotlinOptions {
         jvmTarget = '17'
     }
+    // targetSdk 28 deliberado (como Termux): la app se distribuye
+    // por sideload, silenciar el aviso de Play Store en lint release.
+    lint {
+        disable 'ExpiredTargetSdkVersion'
+    }
 }
 
 // Sin dependencias externas: solo el framework de Android.

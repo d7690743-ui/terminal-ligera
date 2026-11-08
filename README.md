@@ -18,6 +18,30 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.5 — 'pkg' ya funciona: shebangs de com.termux corregidos
+
+Con bash ya corriendo, `pkg-instalar git` moría con:
+`.../usr/bin/bash: .../usr/bin/pkg: /data/data/com.termux/files/usr/bin/bash: bad interpreter: Permission denied`.
+Causa verificada en el zip oficial del bootstrap: 113 scripts
+(pkg incluido) empiezan con `#!/data/data/com.termux/...` y esa
+ruta no existe en esta app (com.nexos.terminal).
+
+Cambios en la 2.5 (versionCode 7):
+- Nueva función `reescribirShebangs()`: recorre usr/, salta
+  enlaces simbólicos y cambia `/data/data/com.termux` por la
+  carpeta real de la app en la primera línea de cada script.
+  Se corre en `instalar` (tras permisos y enlaces) y en
+  `reparar` (reporta "shebangs corregidos: N", ~113 la primera
+  vez, 0 después porque ya quedaron corregidos).
+- `CURL_CA_BUNDLE` y `SSL_CERT_FILE` apuntan a
+  `$PREFIX/etc/tls/cert.pem` del bootstrap cuando existe, para
+  que curl y apt verifiquen HTTPS con los certificados del
+  bootstrap (traen compilada la ruta de com.termux).
+
+Para probar: `reparar` (debe decir "shebangs corregidos: 113"
+aprox.), luego `pkg-instalar git`, `git --version`,
+`muse-instalar`.
+
 ## 2.4 — bash ya corre: targetSdk 28 como Termux
 
 En la 2.3 el `instalar` ya funcionaba perfecto en el teléfono
@@ -215,6 +239,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.4: targetSdk 28 + linker directo"
+git commit -m "Terminal Ligera 2.5: reescribir shebangs com.termux"
 git push origin main
 ```

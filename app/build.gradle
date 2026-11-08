@@ -17,8 +17,8 @@ android {
         // compileSdk sigue en 35. No afecta a la instalación
         // por sideload (el piso de Android 14 es targetSdk 23).
         targetSdk 28
-        versionCode 6
-        versionName '2.4'
+        versionCode 7
+        versionName '2.5'
     }
 
     // Firma estable: una sola llave para todos los builds (2.3).
@@ -58,6 +58,7 @@ android {
     kotlinOptions {
         jvmTarget = '17'
     }
+
     // targetSdk 28 deliberado (como Termux): la app se distribuye
     // por sideload, silenciar el aviso de Play Store en lint release.
     lint {

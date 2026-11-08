@@ -65,6 +65,17 @@ import java.util.zip.ZipInputStream
  * a intentar ejecutar 'bash' y moría igual): para comandos
  * simples corre el binario directo por el linker.
  *
+ * 2.5: reescribir shebangs de com.termux. Con bash ya
+ * corriendo, 'pkg-instalar git' moría con "bad interpreter:
+ * Permission denied": el script pkg (y otros 112 del
+ * bootstrap, verificado en el zip oficial) empieza con
+ * #!/data/data/com.termux/files/usr/bin/bash, una ruta que
+ * no existe en esta app (com.nexos.terminal). Ahora
+ * 'instalar' y 'reparar' reescriben ese prefijo por la
+ * carpeta real de la app en todos los scripts de usr/.
+ * También se fija CURL_CA_BUNDLE/SSL_CERT_FILE al
+ * etc/tls/cert.pem del bootstrap cuando existe.
+ *
  * 1.0: solo /system/bin/sh de Android, sin instalar nada.
  * 2.0: comando `instalar` baja el bootstrap oficial de Termux
  * (aarch64, ~32 MB, SHA-256 verificado) y lo descomprime en la
@@ -362,7 +373,7 @@ class MainActivity : Activity() {
 
     private fun estadoTexto(): String {
         val sb = StringBuilder()
-        sb.append("Estado Terminal Ligera 2.4\n")
+        sb.append("Estado Terminal Ligera 2.5\n")
         sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
         sb.append("\n")
         sb.append("  carpeta: ${filesDir.absolutePath}\n")
@@ -474,6 +485,9 @@ class MainActivity : Activity() {
             post("  $enlaces enlaces creados.\n")
             post("Dando permisos de ejecución a bin/ y libexec/...\n")
             post(aplicarPermisosEjecucion())
+            post("Corrigiendo rutas de com.termux en los scripts...\n")
+            val shebangs = reescribirShebangs()
+            post("  $shebangs shebangs corregidos.\n")
             if (!File(prefixDir, "bin/bash").canExecute()) {
                 post("[ojo: bin/bash sigue sin ser ejecutable tras el chmod. Corre 'reparar' y dime qué dice.]\n")
             }
@@ -488,6 +502,52 @@ class MainActivity : Activity() {
                 scrollToBottom()
             }
         }
+    }
+
+    /** Reescribe los shebangs del bootstrap (2.5).
+     * El bootstrap viene compilado para com.termux: 113 scripts
+     * (verificado en el zip oficial, pkg incluido) empiezan con
+     * #!/data/data/com.termux/files/usr/bin/bash, una ruta que
+     * no existe en esta app (com.nexos.terminal). Por eso 'pkg'
+     * moría con "bad interpreter: Permission denied". Se cambia
+     * ese prefijo por la carpeta real de la app en la primera
+     * línea de cada script de usr/. Se saltan los enlaces
+     * simbólicos (editarlos tocaría el archivo real, ej. sh
+     * apunta a bash) y solo se tocan archivos de texto. */
+    private fun reescribirShebangs(): Int {
+        var corregidos = 0
+        val viejo = "/data/data/com.termux"
+        val nuevo = filesDir.absolutePath
+        if (!prefixDir.exists()) return 0
+        val pila = ArrayDeque<File>()
+        pila.add(prefixDir)
+        while (pila.isNotEmpty()) {
+            val dir = pila.removeFirst()
+            val hijos = dir.listFiles() ?: continue
+            for (f in hijos) {
+                if (f.isDirectory) {
+                    pila.add(f)
+                    continue
+                }
+                if (!f.isFile || !f.canRead()) continue
+                // Saltar enlaces: su ruta canónica es otra.
+                if (f.absolutePath != f.canonicalPath) continue
+                try {
+                    val primera = f.bufferedReader(Charsets.UTF_8).use { it.readLine() } ?: continue
+                    if (!primera.startsWith("#!") || !primera.contains(viejo)) continue
+                    val contenido = f.readBytes()
+                    val fin = contenido.indexOf(10.toByte())
+                    if (fin < 0) continue
+                    val nueva = primera.replace(viejo, nuevo)
+                    val salida = nueva.toByteArray(Charsets.UTF_8) + contenido.copyOfRange(fin, contenido.size)
+                    f.writeBytes(salida)
+                    corregidos++
+                } catch (e: Exception) {
+                    // Seguir con el siguiente archivo.
+                }
+            }
+        }
+        return corregidos
     }
 
     /** Crea los enlaces de SYMLINKS.txt.
@@ -645,6 +705,8 @@ class MainActivity : Activity() {
         sb.append(aplicarPermisosEjecucion())
         val enlaces = crearEnlaces()
         sb.append("  enlaces creados: $enlaces\n")
+        val shebangs = reescribirShebangs()
+        sb.append("  shebangs corregidos: $shebangs\n")
         sb.append(
             "  enlace libreadline.so.8: " +
                 if (File(prefixDir, "lib/libreadline.so.8").exists()) "sí\n" else "NO\n"
@@ -747,6 +809,15 @@ class MainActivity : Activity() {
                     env["LANG"] = "en_US.UTF-8"
                     env["PATH"] = "$prefix/bin:$prefix/bin/applets:/system/bin:/system/xbin"
                     env["LD_LIBRARY_PATH"] = "$prefix/lib"
+                    // Certificados del bootstrap (2.5): curl y apt
+                    // traen compilada la ruta de com.termux para el
+                    // paquete de certificados; aquí sí existe en
+                    // $PREFIX/etc/tls/cert.pem, se apunta con env.
+                    val caBundle = File(prefix, "etc/tls/cert.pem")
+                    if (caBundle.exists()) {
+                        env["CURL_CA_BUNDLE"] = caBundle.absolutePath
+                        env["SSL_CERT_FILE"] = caBundle.absolutePath
+                    }
                     // Sin LD_PRELOAD a propósito: en la 2.0 se prueba sin él.
                 }
                 return p
@@ -870,7 +941,7 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 2.4 — por Nexos
+Terminal Ligera 2.5 — por Nexos
 Escribe 'help' para ver los comandos.
 Sin bootstrap, corre solo los comandos de Android.
 Con 'instalar' baja el bootstrap de Termux
@@ -895,6 +966,14 @@ Comandos propios de esta app:
   estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
+
+NUEVO en 2.5 — 'pkg' ya funciona (shebangs corregidos):
+  El bootstrap trae 113 scripts que empiezan con
+  #!/data/data/com.termux/... y esa ruta no existe en
+  esta app, por eso 'pkg' moría con "bad interpreter".
+  Ahora 'instalar' y 'reparar' corrigen esas rutas por
+  la carpeta real de la app. Si ya tienes el bootstrap,
+  corre 'reparar' y luego 'pkg-instalar git'.
 
 NUEVO en 2.4 — bash ya corre (targetSdk 28, como Termux):
   En la 2.3 el bootstrap ya se instalaba bien, pero Android
@@ -948,7 +1027,7 @@ Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 2.4
+Terminal Ligera 2.5
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
 Sin bootstrap: corre /system/bin/sh como usuario

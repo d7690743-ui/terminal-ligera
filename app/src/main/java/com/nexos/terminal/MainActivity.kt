@@ -1,6 +1,7 @@
 package com.nexos.terminal
 
 import android.app.Activity
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
@@ -8,22 +9,48 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.ScrollView
 import android.widget.TextView
-import android.widget.Toast
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
+import java.util.zip.ZipInputStream
 
 /**
- * Terminal Ligera 1.0 — terminal propia, sin Termux y sin paquetes.
+ * Terminal Ligera 2.0 — terminal propia, con instalador experimental.
  *
- * Cada comando se corre con /system/bin/sh en un hilo aparte y la
- * salida se muestra en la pantalla. No hay apt/pkg, ni Python, ni
- * Git, ni comandos interactivos (nano, vi, ssh, python sin args).
- * El shell corre como usuario de la app, sin root.
+ * 1.0: solo /system/bin/sh de Android, sin instalar nada.
+ * 2.0: comando `instalar` baja el bootstrap oficial de Termux
+ * (aarch64, ~32 MB, SHA-256 verificado) y lo descomprime en la
+ * carpeta privada de la app (filesDir/usr). Después de eso, los
+ * comandos corren con el bash de ese bootstrap, con PREFIX, PATH
+ * y LD_LIBRARY_PATH apuntando a él, así que `pkg`, `apt`, `curl`
+ * y `bash` ya existen, y `pkg-instalar git` puede instalar git.
+ * Después, `muse-instalar` intenta instalar Muse Code con su
+ * instalador oficial (curl | bash).
  *
- * Comandos propios (no pasan por el shell):
- *   help / ayuda, clear / limpiar, cd, pwd, history, acerca, salir
+ * LÍMITES HONESTOS (léelos antes de ilusionarte):
+ * - Esto es un intento, no una garantía. El bootstrap está hecho
+ *   para Termux (paquete com.termux); aquí vive en
+ *   com.nexos.terminal, así que algunos scripts con rutas de
+ *   Termux escritas pueden fallar. El error exacto saldrá en
+ *   pantalla y se puede iterar sobre él.
+ * - Muse Code es interactivo: necesita una terminal con PTY y
+ *   lee su login desde /dev/tty. Esta app corre cada comando
+ *   de una sola vez, sin PTY, con límite de tiempo. Por eso
+ *   `muse --version` sí puede funcionar, pero `muse login`
+ *   y `muse` a secas muy probablemente fallen o se corten.
+ *   Lo que sí puede funcionar es `muse exec` con META_API_KEY,
+ *   si ya tienes una.
+ * - Sin root. Sin tocar /system ni la carpeta de Termux.
+ * - La instalación baja ~32 MB y ocupa ~150 MB al descomprimir.
+ *   Necesitas internet y espacio libre.
  */
 class MainActivity : Activity() {
 
@@ -37,9 +64,35 @@ class MainActivity : Activity() {
     private lateinit var currentDir: File
 
     companion object {
-        private const val MAX_OUTPUT_CHARS = 60000
+        private const val MAX_OUTPUT_CHARS = 80000
         private const val MAX_CMD_OUTPUT = 15000
-        private const val TIMEOUT_SECONDS = 10L
+        private const val MAX_LONG_OUTPUT = 30000
+        private const val TIMEOUT_SECONDS = 30L
+        private const val LONG_TIMEOUT_SECONDS = 180L
+
+        // Bootstrap oficial de Termux, verificado en 2026-11-07:
+        // https://github.com/termux/termux-packages/releases/download/
+        //   bootstrap-2026.11.01-r1+apt.android-7/bootstrap-aarch64.zip
+        // 32 MB, SHA-256 5a1429b6c68ee3bdc17b5fd6e47ba42933ec924cd7283fe74992574e1d5badae
+        // Trae bash, curl, apt, pkg y dpkg. Git NO viene: se instala
+        // después con `pkg-instalar git`.
+        private const val BOOTSTRAP_VERSION = "2026.11.01-r1+apt.android-7"
+        private const val BOOTSTRAP_URL =
+            "https://github.com/termux/termux-packages/releases/download/" +
+                "bootstrap-2026.11.01-r1+apt.android-7/bootstrap-aarch64.zip"
+        private const val BOOTSTRAP_SHA256 =
+            "5a1429b6c68ee3bdc17b5fd6e47ba42933ec924cd7283fe74992574e1d5badae"
+        private const val MUSE_INSTALL_URL = "https://dev.meta.ai/install.sh"
+    }
+
+    private val prefixDir: File get() = File(filesDir, "usr")
+    private val bootstrapOkFile: File get() = File(filesDir, ".bootstrap-ok")
+    private val museBin: File get() = File(filesDir, ".local/bin/muse")
+
+    private fun isBootstrapInstalled(): Boolean {
+        return bootstrapOkFile.exists() &&
+            File(prefixDir, "bin/bash").exists() &&
+            File(prefixDir, "bin/curl").exists()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -64,6 +117,11 @@ class MainActivity : Activity() {
             tvOutput.text = terminalText.toString()
         } else {
             appendOutput(WELCOME)
+            if (isBootstrapInstalled()) {
+                appendOutput("[bootstrap ya instalado: bash, curl, pkg listos. Escribe 'estado']\n")
+            } else {
+                appendOutput("[sin bootstrap todavía. Escribe 'instalar' para bajarlo (~32 MB)]\n")
+            }
         }
         scrollToBottom()
 
@@ -119,11 +177,11 @@ class MainActivity : Activity() {
         val cmd = raw.trim()
         if (cmd.isEmpty()) return
 
-        // Historial: no repetir el mismo comando seguido.
         if (history.isEmpty() || history.last() != cmd) history.add(cmd)
         historyIndex = history.size
 
-        when (val first = cmd.split(" ").first().lowercase()) {
+        val first = cmd.split(" ").first().lowercase()
+        when (first) {
             "clear", "limpiar" -> {
                 terminalText.clear()
                 tvOutput.text = ""
@@ -167,10 +225,72 @@ class MainActivity : Activity() {
                 scrollToBottom()
                 return
             }
-            else -> {
-                // Sigue al shell. El primer token no es un comando propio.
-                @Suppress("UNUSED_VARIABLE")
-                val ignored = first
+            "estado" -> {
+                appendOutput("$ $cmd\n")
+                appendOutput(estadoTexto())
+                scrollToBottom()
+                return
+            }
+            "instalar", "bootstrap" -> {
+                appendOutput("$ $cmd\n")
+                appendOutput("Instalando bootstrap de Termux ($BOOTSTRAP_VERSION, ~32 MB)...\nNo cierres la app, tarda unos minutos.\n")
+                scrollToBottom()
+                Thread { instalarBootstrap() }.start()
+                return
+            }
+            "pkg-instalar" -> {
+                val args = cmd.removePrefix("pkg-instalar").trim()
+                appendOutput("$ $cmd\n")
+                if (args.isEmpty() || !args.matches(Regex("[a-z0-9._\\- ]+"))) {
+                    appendOutput("Uso: pkg-instalar git   (solo nombres de paquetes, sin ; | $)\n")
+                    scrollToBottom()
+                    return
+                }
+                if (!isBootstrapInstalled()) {
+                    appendOutput("Primero corre 'instalar' para bajar el bootstrap.\n")
+                    scrollToBottom()
+                    return
+                }
+                scrollToBottom()
+                Thread {
+                    val out = runShellLong("pkg install -y $args")
+                    runOnUiThread {
+                        if (out.isNotEmpty()) appendOutput(out)
+                        appendOutput(estadoTexto())
+                        scrollToBottom()
+                    }
+                }.start()
+                return
+            }
+            "muse-instalar" -> {
+                appendOutput("$ $cmd\n")
+                if (!isBootstrapInstalled()) {
+                    appendOutput("Primero corre 'instalar' para bajar el bootstrap.\n")
+                    scrollToBottom()
+                    return
+                }
+                appendOutput("Instalando Muse Code con su instalador oficial...\nEsto baja ~100 MB. Después prueba 'muse --version'.\nOjo: 'muse login' es interactivo y aquí puede fallar, ver 'help'.\n")
+                scrollToBottom()
+                Thread {
+                    val out = runShellLong("curl -fsSL $MUSE_INSTALL_URL | bash")
+                    runOnUiThread {
+                        if (out.isNotEmpty()) appendOutput(out)
+                        if (museBin.exists()) {
+                            appendOutput("[muse instalado en .local/bin/muse, probando versión...]\n")
+                            Thread {
+                                val v = runShellLong("muse --version")
+                                runOnUiThread {
+                                    if (v.isNotEmpty()) appendOutput(v)
+                                    scrollToBottom()
+                                }
+                            }.start()
+                        } else {
+                            appendOutput("[muse NO quedó instalado. Revisa el error de arriba.]\n")
+                        }
+                        scrollToBottom()
+                    }
+                }.start()
+                return
             }
         }
 
@@ -178,7 +298,7 @@ class MainActivity : Activity() {
         scrollToBottom()
 
         Thread {
-            val out = runShell(cmd)
+            val out = runShell(cmd, TIMEOUT_SECONDS)
             runOnUiThread {
                 if (out.isNotEmpty()) appendOutput(out)
                 scrollToBottom()
@@ -186,34 +306,242 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    /** Corre el comando con /system/bin/sh, con timeout y salida recortada. */
-    private fun runShell(cmd: String): String {
+    private fun estadoTexto(): String {
+        val sb = StringBuilder()
+        sb.append("Estado Terminal Ligera 2.0\n")
+        sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
+        sb.append("\n")
+        sb.append("  carpeta: ${filesDir.absolutePath}\n")
+        if (isBootstrapInstalled()) {
+            val prefix = prefixDir.absolutePath
+            listOf("bin/bash", "bin/curl", "bin/apt", "bin/pkg", "bin/git", "bin/python3").forEach {
+                sb.append("  $it: " + if (File(prefix, it).exists()) "sí" else "no")
+                sb.append("\n")
+            }
+        }
+        sb.append("  muse: " + if (museBin.exists()) "instalado en .local/bin/muse" else "no instalado (corre 'muse-instalar' tras el bootstrap)")
+        sb.append("\n")
+        return sb.toString()
+    }
+
+    /** Descarga (con SHA-256) y descomprime el bootstrap en filesDir/usr. */
+    private fun instalarBootstrap() {
+        fun post(s: String) {
+            runOnUiThread {
+                appendOutput(s)
+                scrollToBottom()
+            }
+        }
+        try {
+            if (!Build.SUPPORTED_ABIS.contains("arm64-v8a")) {
+                post("[error: este instalador solo trae bootstrap aarch64 (arm64). Este teléfono reporta: ${Build.SUPPORTED_ABIS.joinToString()}]\n")
+                return
+            }
+            if (isBootstrapInstalled()) {
+                post("[el bootstrap ya estaba instalado. Escribe 'estado']\n")
+                return
+            }
+            val zipFile = File(filesDir, "bootstrap-aarch64.zip")
+            post("Bajando bootstrap (~32 MB) de github.com/termux/termux-packages...\n")
+            val url = URL(BOOTSTRAP_URL)
+            val conn = url.openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = true
+            conn.connectTimeout = 20000
+            conn.readTimeout = 30000
+            conn.connect()
+            if (conn.responseCode != HttpURLConnection.HTTP_OK) {
+                post("[error al bajar: HTTP ${conn.responseCode}]\n")
+                return
+            }
+            val total = conn.contentLengthLong
+            val digest = MessageDigest.getInstance("SHA-256")
+            var bajado = 0L
+            var ultimoAviso = 0L
+            BufferedInputStream(conn.inputStream).use { input ->
+                BufferedOutputStream(FileOutputStream(zipFile)).use { out ->
+                    val buf = ByteArray(8192)
+                    var n: Int
+                    while (input.read(buf).also { n = it } != -1) {
+                        out.write(buf, 0, n)
+                        digest.update(buf, 0, n)
+                        bajado += n
+                        if (bajado - ultimoAviso >= 5 * 1024 * 1024) {
+                            ultimoAviso = bajado
+                            val mb = bajado / 1024 / 1024
+                            val tot = if (total > 0) " / ${total / 1024 / 1024} MB" else ""
+                            post("  bajando... $mb MB$tot\n")
+                        }
+                    }
+                }
+            }
+            conn.disconnect()
+            val sha = digest.digest().joinToString("") { "%02x".format(it) }
+            post("SHA-256 bajado: $sha\n")
+            if (sha != BOOTSTRAP_SHA256) {
+                zipFile.delete()
+                post("[error: el SHA-256 no coincide con el oficial. Borré el zip, inténtalo de nuevo.]\n")
+                return
+            }
+            post("SHA-256 correcto. Descomprimiendo en usr/...\n")
+            prefixDir.mkdirs()
+            var archivos = 0
+            ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zin ->
+                var entry = zin.nextEntry
+                while (entry != null) {
+                    val outFile = File(prefixDir, entry.name)
+                    // Seguridad: nada fuera de usr/.
+                    if (outFile.canonicalPath.startsWith(prefixDir.canonicalPath)) {
+                        if (entry.isDirectory) {
+                            outFile.mkdirs()
+                        } else {
+                            outFile.parentFile?.mkdirs()
+                            BufferedOutputStream(FileOutputStream(outFile)).use { out ->
+                                zin.copyTo(out)
+                            }
+                            if (entry.name.startsWith("bin/") || entry.name.startsWith("libexec/") ||
+                                entry.name.endsWith(".sh")
+                            ) {
+                                outFile.setExecutable(true, false)
+                            }
+                            archivos++
+                        }
+                    }
+                    zin.closeEntry()
+                    entry = zin.nextEntry
+                }
+            }
+            post("  $archivos archivos. Creando enlaces (SYMLINKS.txt)...\n")
+            val enlaces = crearEnlaces()
+            post("  $enlaces enlaces creados.\n")
+            post("Dando permisos de ejecución a bin/...\n")
+            runSystemSh("chmod -R +x \"${prefixDir.absolutePath}/bin\" \"${prefixDir.absolutePath}/libexec\" 2>/dev/null; true")
+            zipFile.delete()
+            bootstrapOkFile.writeText("bootstrap $BOOTSTRAP_VERSION instalado\n")
+            post("Listo. Bootstrap instalado.\n")
+            post(estadoTexto())
+            post("Prueba ahora, en orden:\n  bash --version\n  curl --version\n  pkg-instalar git\n  git --version\nDespués: muse-instalar\n")
+        } catch (e: Exception) {
+            runOnUiThread {
+                appendOutput("[error en instalar: ${e.message}]\n")
+                scrollToBottom()
+            }
+        }
+    }
+
+    /** Crea los enlaces de SYMLINKS.txt con `ln -sf` del shell de Android. */
+    private fun crearEnlaces(): Int {
+        var creados = 0
+        try {
+            val lista = File(prefixDir, "SYMLINKS.txt")
+            if (!lista.exists()) return 0
+            lista.forEachLine { linea ->
+                if (!linea.contains("←")) return@forEachLine
+                val partes = linea.split("←")
+                if (partes.size != 2) return@forEachLine
+                val a = partes[0].trim()
+                val b = partes[1].trim()
+                if (a.isEmpty() || b.isEmpty()) return@forEachLine
+                // Un lado es el enlace (no existe como archivo) y el otro
+                // el destino (sí existe). Lo averiguamos, no lo suponemos.
+                val fileA = File(prefixDir, a.removePrefix("./"))
+                val fileB = File(prefixDir, b.removePrefix("./"))
+                val (enlace, destino) = when {
+                    !fileA.exists() && fileB.exists() -> Pair(a, b)
+                    !fileB.exists() && fileA.exists() -> Pair(b, a)
+                    else -> return@forEachLine
+                }
+                val ok = runSystemSh(
+                    "ln -sf \"$destino\" \"${prefixDir.absolutePath}/${enlace.removePrefix("./")}\""
+                )
+                if (ok) creados++
+            }
+        } catch (e: Exception) {
+            // Los enlaces que falten se reportan en el conteo, no se rompe todo.
+        }
+        return creados
+    }
+
+    /** Corre un comando corto con /system/bin/sh. Devuelve true si salió con 0. */
+    private fun runSystemSh(cmd: String): Boolean {
         return try {
-            val pb = ProcessBuilder("/system/bin/sh", "-c", cmd)
+            val p = ProcessBuilder("/system/bin/sh", "-c", cmd)
+                .directory(prefixDir)
+                .redirectErrorStream(true)
+                .start()
+            p.waitFor(15, TimeUnit.SECONDS)
+            p.exitValue() == 0
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /** Shell principal: bash del bootstrap si está, si no /system/bin/sh. */
+    private fun runShell(cmd: String, timeoutSeconds: Long): String {
+        return runShellWithTimeout(cmd, timeoutSeconds, MAX_CMD_OUTPUT)
+    }
+
+    private fun runShellLong(cmd: String): String {
+        return runShellWithTimeout(cmd, LONG_TIMEOUT_SECONDS, MAX_LONG_OUTPUT)
+    }
+
+    private fun runShellWithTimeout(cmd: String, timeoutSeconds: Long, maxChars: Int): String {
+        return try {
+            val bootstrap = isBootstrapInstalled()
+            val shell = if (bootstrap) File(prefixDir, "bin/bash").absolutePath else "/system/bin/sh"
+            val pb = ProcessBuilder(shell, "-c", cmd)
             pb.directory(currentDir)
             pb.redirectErrorStream(true)
+            if (bootstrap) {
+                val env = pb.environment()
+                val prefix = prefixDir.absolutePath
+                val home = filesDir.absolutePath
+                env["HOME"] = home
+                env["PREFIX"] = prefix
+                env["TMPDIR"] = "$prefix/tmp"
+                env["TERM"] = "xterm-256color"
+                env["LANG"] = "en_US.UTF-8"
+                env["PATH"] = "$prefix/bin:$prefix/bin/applets:/system/bin:/system/xbin"
+                env["LD_LIBRARY_PATH"] = "$prefix/lib"
+                // Sin LD_PRELOAD a propósito: en la 2.0 se prueba sin él.
+                // Si los scripts de Termux fallan por sus rutas escritas,
+                // el error saldrá en pantalla y se ajusta en la 2.1.
+            }
             val process = pb.start()
-            val finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            val sb = StringBuilder()
+            val lector = Thread {
+                try {
+                    val reader = BufferedReader(InputStreamReader(process.inputStream))
+                    var line: String?
+                    var total = 0
+                    while (reader.readLine().also { line = it } != null) {
+                        val l = line ?: break
+                        if (total + l.length > maxChars) {
+                            sb.append("\n[salida recortada, era más larga]\n")
+                            break
+                        }
+                        sb.append(l).append('\n')
+                        total += l.length + 1
+                    }
+                    reader.close()
+                } catch (e: Exception) {
+                    // La lectura se corta si el proceso muere por timeout.
+                }
+            }
+            lector.start()
+            val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
             if (!finished) {
                 process.destroyForcibly()
-                return "[tiempo agotado: $TIMEOUT_SECONDS s, comando detenido]\n"
+                lector.join(2000)
+                sb.append("[tiempo agotado: $timeoutSeconds s, comando detenido]\n")
+                return sb.toString()
             }
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            val sb = StringBuilder()
-            var line: String?
-            var total = 0
-            while (reader.readLine().also { line = it } != null) {
-                val l = line ?: break
-                if (total + l.length > MAX_CMD_OUTPUT) {
-                    sb.append("\n[salida recortada, era más larga]\n")
-                    break
-                }
-                sb.append(l).append('\n')
-                total += l.length + 1
-            }
-            reader.close()
+            lector.join(5000)
             if (sb.isEmpty()) {
-                val code = process.exitValue()
+                val code = try {
+                    process.exitValue()
+                } catch (e: Exception) {
+                    -1
+                }
                 if (code != 0) "[salió con código $code]\n" else ""
             } else {
                 sb.toString()
@@ -265,7 +593,6 @@ class MainActivity : Activity() {
 
     private fun appendOutput(text: String) {
         terminalText.append(text)
-        // No dejar crecer la pantalla sin límite.
         if (terminalText.length > MAX_OUTPUT_CHARS) {
             terminalText.delete(0, terminalText.length - MAX_OUTPUT_CHARS)
         }
@@ -278,17 +605,18 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 1.0 — por Nexos
+Terminal Ligera 2.0 — por Nexos
 Escribe 'help' para ver los comandos.
-Ojo: es ligera, no es Termux. No tiene pkg, apt,
-Python ni Git. Corre los comandos de Android.
-Tu carpeta de inicio es la de la app.
-Pruébalo: pwd  •  ls -la  •  date  •  echo hola
+Sin bootstrap, corre solo los comandos de Android.
+Con 'instalar' baja el bootstrap de Termux
+(bash, curl, pkg, apt) y ya se le puede
+instalar git y probar Muse Code.
+Pruébalo: estado  •  help  •  instalar
 
 """
 
 private const val HELP = """
-Comandos que sí corren (del shell de Android):
+Comandos de Android (sin bootstrap):
   pwd, ls, ls -la, echo, date, whoami, id
   uname -a, cat <archivo>, env, getprop
   mkdir, touch, cp, mv, rm (con cuidado)
@@ -299,21 +627,41 @@ Comandos propios de esta app:
   cd <carpeta>   — cambia de carpeta (cd sin nada = casa)
   pwd            — muestra la carpeta actual
   history        — comandos que ya escribiste
+  estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
 
-Lo que NO corre aquí:
-  pkg, apt, python, pip, git, nano, vi, ssh
-  ni nada interactivo. Para eso sigue Termux.
+NUEVO en 2.0 — instalar lo que falta:
+  instalar       — baja y descomprime el bootstrap oficial
+                   de Termux (~32 MB, SHA-256 verificado).
+                   Tarda minutos, no cierres la app.
+  pkg-instalar git — instala un paquete con pkg (tras 'instalar').
+                   Ejemplo: pkg-instalar git
+  muse-instalar  — instala Muse Code con su instalador oficial
+                   (curl | bash, ~100 MB). Después prueba
+                   'muse --version'.
+
+Después de 'instalar', estos ya corren:
+  bash, curl, pkg, apt, dpkg, y lo que instales con pkg.
+
+Lo que probablemente SIGUE sin correr:
+  muse login y 'muse' a secas: son interactivos, necesitan
+  una terminal con PTY y leen desde /dev/tty, y esta app
+  corre cada comando de una sola vez, con límite de 30 s.
+  Si tienes META_API_KEY, prueba 'muse exec' en vez de 'muse'.
+  nano, vi y ssh interactivo tampoco, por lo mismo.
 
 Atajos de arriba: ls, pwd, date, help.
 Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 1.0
+Terminal Ligera 2.0
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
-Corre /system/bin/sh como usuario de la app,
-sin root. Sin internet, sin cuentas.
+Sin bootstrap: corre /system/bin/sh como usuario
+de la app, sin root. Con bootstrap: corre el bash
+de Termux en filesDir/usr, también sin root.
+Con internet solo para bajar el bootstrap y
+los paquetes que tú pidas. Sin cuentas.
 """

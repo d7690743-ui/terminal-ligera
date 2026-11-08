@@ -122,6 +122,14 @@ import java.util.zip.ZipInputStream
  * el bootstrap (119 fuera de bin/ y libexec/, verificado
  * en el zip oficial), y 'reparar' verifica los methods.
  *
+ * 2.10: pkg-instalar ya no usa 'pkg install'/dpkg (los .deb de
+ * Termux traen rutas absolutas de com.termux). Nuevo script
+ * $PREFIX/bin/tl-pkg: apt-get download + dpkg-deb -x + reubicar
+ * rutas + registrar en dpkg/status (postinst omitidos). apt.conf
+ * ahora fija CaInfo (libcurl no lee CURL_CA_BUNDLE) y desactiva el
+ * sandbox _apt. pkg-instalar y muse-instalar muestran la salida
+ * en vivo; timeout largo 600 s.
+ *
  * 1.0: solo /system/bin/sh de Android, sin instalar nada.
  * 2.0: comando `instalar` baja el bootstrap oficial de Termux
  * (aarch64, ~32 MB, SHA-256 verificado) y lo descomprime en la
@@ -165,7 +173,7 @@ class MainActivity : Activity() {
         private const val MAX_CMD_OUTPUT = 15000
         private const val MAX_LONG_OUTPUT = 30000
         private const val TIMEOUT_SECONDS = 30L
-        private const val LONG_TIMEOUT_SECONDS = 180L
+        private const val LONG_TIMEOUT_SECONDS = 600L
 
         // Bootstrap oficial de Termux, verificado en 2026-11-07:
         // https://github.com/termux/termux-packages/releases/download/
@@ -352,7 +360,7 @@ class MainActivity : Activity() {
             "pkg-instalar" -> {
                 val args = cmd.removePrefix("pkg-instalar").trim()
                 appendOutput("$ $cmd\n")
-                if (args.isEmpty() || !args.matches(Regex("[a-z0-9._\\- ]+"))) {
+                if (args.isEmpty() || !args.matches(Regex("[a-z0-9._+\\- ]+"))) {
                     appendOutput("Uso: pkg-instalar git   (solo nombres de paquetes, sin ; | $)\n")
                     scrollToBottom()
                     return
@@ -363,8 +371,13 @@ class MainActivity : Activity() {
                     return
                 }
                 scrollToBottom()
+                // 2.10: ya no se usa 'pkg install' (dpkg escribiría en
+                // /data/data/com.termux). tl-pkg baja los .deb con apt,
+                // los extrae con dpkg-deb, reubica las rutas y registra
+                // el paquete. La salida sale en vivo.
                 Thread {
-                    val out = runShellLong("pkg install -y $args")
+                    escribirTlPkg()
+                    val out = runShellLong("tl-pkg $args", live = true)
                     runOnUiThread {
                         if (out.isNotEmpty()) appendOutput(out)
                         appendOutput(estadoTexto())
@@ -383,7 +396,7 @@ class MainActivity : Activity() {
                 appendOutput("Instalando Muse Code con su instalador oficial...\nEsto baja ~100 MB. Después prueba 'muse --version'.\nOjo: 'muse login' es interactivo y aquí puede fallar, ver 'help'.\n")
                 scrollToBottom()
                 Thread {
-                    val out = runShellLong("curl -fsSL $MUSE_INSTALL_URL | bash")
+                    val out = runShellLong("curl -fsSL $MUSE_INSTALL_URL | bash", live = true)
                     runOnUiThread {
                         if (out.isNotEmpty()) appendOutput(out)
                         if (museBin.exists()) {
@@ -419,7 +432,7 @@ class MainActivity : Activity() {
 
     private fun estadoTexto(): String {
         val sb = StringBuilder()
-        sb.append("Estado Terminal Ligera 2.9\n")
+        sb.append("Estado Terminal Ligera 2.10\n")
         sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
         sb.append("\n")
         sb.append("  carpeta: ${filesDir.absolutePath}\n")
@@ -951,7 +964,13 @@ class MainActivity : Activity() {
                 "Dir::Cache::srcpkgcache \"srcpkgcache.bin\";\n" +
                 "Dir::Cache::pkgcache \"pkgcache.bin\";\n" +
                 "Dir::Bin::methods \"$p/lib/apt/methods\";\n" +
-                "Dir::Bin::dpkg \"$p/bin/dpkg\";\n"
+                "Dir::Bin::dpkg \"$p/bin/dpkg\";\n" +
+                // 2.10: libcurl (el que usa el method https de apt) trae
+                // compilada la ruta de certificados de com.termux y no
+                // lee CURL_CA_BUNDLE (eso es solo de la herramienta curl).
+                "Acquire::https::CaInfo \"$p/etc/tls/cert.pem\";\n" +
+                "Acquire::http::CaInfo \"$p/etc/tls/cert.pem\";\n" +
+                "APT::Sandbox::User \"\";\n"
             )
             "  apt.conf: listo ($p/etc/apt/apt.conf)\n"
         } catch (e: Exception) {
@@ -978,6 +997,61 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Escribe $PREFIX/bin/tl-pkg (2.10): instalador de paquetes que
+     *  esquiva a dpkg. Los .deb de Termux traen rutas absolutas
+     *  (./data/data/com.termux/files/usr/...) y dpkg intentaría
+     *  escribir ahí. tl-pkg: apt-get update, resuelve dependencias
+     *  con 'apt-get install -s', baja cada .deb con 'apt-get
+     *  download', lo extrae con dpkg-deb -x, reescribe la ruta de
+     *  Termux en los textos, copia usr/ a nuestro prefijo y lo
+     *  registra en var/lib/dpkg/status. Los postinst se omiten.
+     *  En el script, § se cambia por $ (evita plantillas de Kotlin). */
+    private fun escribirTlPkg() {
+        try {
+            val script = """
+set -e
+P="§PREFIX"
+NEW="§HOME"
+DATA="§(dirname "§HOME")"
+CACHE="§DATA/cache"
+W="§TMPDIR/tl-pkg"
+STATUS="§P/var/lib/dpkg/status"
+if [ -z "§1" ]; then echo "uso: tl-pkg paquete..."; exit 1; fi
+rm -rf "§W"; mkdir -p "§W/dl" "§W/ex" "§P/var/lib/dpkg/info"
+echo "[1/4] apt-get update..."
+apt-get update
+echo "[2/4] resolviendo dependencias..."
+SIM="§(apt-get install -s -y "§@" 2>&1)" || { echo "§SIM"; exit 1; }
+LISTA="§(echo "§SIM" | awk '/^Inst /{print §2}')"
+if [ -z "§LISTA" ]; then echo "§SIM" | tail -5; echo "nada que instalar (ya está o no existe)"; exit 0; fi
+echo "paquetes: §LISTA"
+echo "[3/4] bajando..."
+cd "§W/dl"
+for n in §LISTA; do echo "  bajando §n"; apt-get download "§n"; done
+echo "[4/4] instalando..."
+for deb in "§W"/dl/*.deb; do
+  n="§(dpkg-deb -f "§deb" Package)"
+  echo "  instalando §n"
+  rm -rf "§W/ex"; mkdir -p "§W/ex"
+  dpkg-deb -x "§deb" "§W/ex"
+  R="§W/ex/data/data/com.termux/files"
+  if [ ! -d "§R/usr" ]; then echo "  [error: §n no trae data/data/com.termux/files/usr]"; ls "§W/ex"; exit 1; fi
+  grep -rIlZ "/data/data/com.termux" "§W/ex" | xargs -0 -r sed -i -e "s|/data/data/com.termux/files|§NEW|g" -e "s|/data/data/com.termux/cache|§CACHE|g" -e "s|/data/data/com.termux|§DATA|g" || true
+  cp -a "§R/usr/." "§P/"
+  awk -v pkg="§n" 'BEGIN{RS="";ORS="\n\n"} index("\n" §0 "\n", "\nPackage: " pkg "\n")==0' "§STATUS" > "§STATUS.new" && mv "§STATUS.new" "§STATUS"
+  { dpkg-deb -f "§deb"; echo "Status: install ok installed"; echo; } >> "§STATUS"
+done
+rm -rf "§W"
+echo "listo (scripts postinst omitidos)."
+"""
+            val f = File(prefixDir, "bin/tl-pkg")
+            f.writeText("#!" + prefixDir.absolutePath + "/bin/bash\n" + script.trimStart().replace("§", "$"))
+            Os.chmod(f.absolutePath, 493) // 0755
+        } catch (e: Exception) {
+            // Si falla, 'tl-pkg' dará "not found" y se ve en pantalla.
+        }
+    }
+
     /** Corre un comando corto con /system/bin/sh. Devuelve true si salió con 0. */
     private fun runSystemSh(cmd: String): Boolean {
         return try {
@@ -997,8 +1071,10 @@ class MainActivity : Activity() {
         return runShellWithTimeout(cmd, timeoutSeconds, MAX_CMD_OUTPUT)
     }
 
-    private fun runShellLong(cmd: String): String {
-        return runShellWithTimeout(cmd, LONG_TIMEOUT_SECONDS, MAX_LONG_OUTPUT)
+    /** live=true (2.10): las líneas salen en pantalla conforme llegan
+     *  y el String devuelto solo trae avisos (timeout, código). */
+    private fun runShellLong(cmd: String, live: Boolean = false): String {
+        return runShellWithTimeout(cmd, LONG_TIMEOUT_SECONDS, MAX_LONG_OUTPUT, live)
     }
 
     /** Si el comando es simple (un binario + argumentos, sin
@@ -1026,7 +1102,7 @@ class MainActivity : Activity() {
         return listOf("/system/bin/linker64", bin.absolutePath) + partes.drop(1)
     }
 
-    private fun runShellWithTimeout(cmd: String, timeoutSeconds: Long, maxChars: Int): String {
+    private fun runShellWithTimeout(cmd: String, timeoutSeconds: Long, maxChars: Int, live: Boolean = false): String {
         return try {
             val bootstrap = isBootstrapInstalled()
             val bashPath = File(prefixDir, "bin/bash").absolutePath
@@ -1107,6 +1183,12 @@ class MainActivity : Activity() {
                     sb.append("[aviso: bash no arrancó, usando sh de Android. Corre 'reparar']\n")
                 }
             }
+            // 2.10: en modo live cada línea se pinta al llegar (antes
+            // la pantalla quedaba en blanco hasta que terminaba).
+            fun emitir(s: String) {
+                if (live) runOnUiThread { appendOutput(s); scrollToBottom() }
+                else sb.append(s)
+            }
             val lector = Thread {
                 try {
                     val reader = BufferedReader(InputStreamReader(proc.inputStream))
@@ -1115,10 +1197,10 @@ class MainActivity : Activity() {
                     while (reader.readLine().also { line = it } != null) {
                         val l = line ?: break
                         if (total + l.length > maxChars) {
-                            sb.append("\n[salida recortada, era más larga]\n")
+                            emitir("\n[salida recortada, era más larga]\n")
                             break
                         }
-                        sb.append(l).append('\n')
+                        emitir(l + "\n")
                         total += l.length + 1
                     }
                     reader.close()
@@ -1204,7 +1286,7 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 2.9 — por Nexos
+Terminal Ligera 2.10 — por Nexos
 Escribe 'help' para ver los comandos.
 Sin bootstrap, corre solo los comandos de Android.
 Con 'instalar' baja el bootstrap de Termux
@@ -1229,6 +1311,12 @@ Comandos propios de esta app:
   estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
+
+NUEVO en 2.10 — pkg-instalar sin dpkg:
+  Corre 'reparar' (apt.conf nuevo con certificados) y luego
+  'pkg-instalar git'. Ahora baja los .deb, los extrae y
+  reubica las rutas de Termux; la salida sale en vivo.
+  Los scripts postinst de los paquetes se omiten.
 
 NUEVO en 2.9 — los methods de apt ya se pueden ejecutar:
   Con la 2.8 pkg ya corre y elige mirror, pero apt moría
@@ -1330,7 +1418,7 @@ Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 2.9
+Terminal Ligera 2.10
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
 Sin bootstrap: corre /system/bin/sh como usuario

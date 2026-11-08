@@ -18,6 +18,32 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.10 — pkg-instalar sin dpkg, certificados de apt, salida en vivo
+
+Con la 2.9 `apt update` ya arranca. Dos problemas esperados
+después (analizados contra el bootstrap oficial):
+
+1. **Certificados:** el method https usa libcurl, que trae la
+   ruta de certificados de com.termux y no lee `CURL_CA_BUNDLE`.
+   `apt.conf` ahora fija `Acquire::https::CaInfo` (y http) a
+   `$PREFIX/etc/tls/cert.pem`, y `APT::Sandbox::User ""`
+   (no existe el usuario `_apt`).
+2. **dpkg:** los `.deb` de Termux traen rutas absolutas
+   (`./data/data/com.termux/files/usr/...`), así que dpkg
+   escribiría fuera de la app. `pkg-instalar` ahora crea y corre
+   `$PREFIX/bin/tl-pkg`: `apt-get update`, resuelve dependencias
+   con `apt-get install -s`, baja cada `.deb` con
+   `apt-get download`, lo extrae con `dpkg-deb -x`, reescribe la
+   ruta de Termux en los textos, copia `usr/` al prefijo y lo
+   registra en `var/lib/dpkg/status`. Los `postinst` se omiten.
+
+Además: la salida de `pkg-instalar` y `muse-instalar` sale en
+vivo (antes quedaba en blanco hasta el final) y el timeout largo
+sube de 180 a 600 s.
+
+Para probar: `reparar`, `pkg-instalar git`, `git --version`.
+Si falla, manda el último mensaje que salga en pantalla.
+
 ## 2.9 — los methods de apt ya se pueden ejecutar (fix 2.8)
 
 Con la 2.8 `pkg` ya corre (prueba los mirrors y elige uno),
@@ -74,7 +100,7 @@ bootstrap compilado con el prefijo propio
 (`TERMUX_APP_PACKAGE=com.nexos.terminal`, lo más limpio
 pero es un build grande con NDK) o extraer el `.deb` de git
 a mano. Cambiar el `applicationId` a `com.termux` NO es
-opción: David tiene Termux instalado y chocarían.
+opción: el usuario tiene Termux instalado y chocarían.
 
 Para probar: `reparar` (debe decir "rutas en textos" con
 miles de reemplazos y "apt.conf: listo"), luego
@@ -308,8 +334,8 @@ archivos de la app y de carpetas a las que tenga acceso.
 ## Datos técnicos
 
 - Paquete: `com.nexos.terminal`
-- Versión: 2.0 (versionCode 2)
-- compileSdk / targetSdk 35, minSdk 24
+- Versión: 2.10 (versionCode 12)
+- compileSdk 35, targetSdk 28, minSdk 24
 - Java 17, Gradle 8.9, AGP 8.7.3, Kotlin 1.9.24
 - Sin dependencias externas. Internet solo para bajar el bootstrap
   y los paquetes que el usuario pida. Sin cuentas.
@@ -336,6 +362,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.9: permiso de ejecución a methods de apt y ejecutables fuera de bin"
+git commit -m "Terminal Ligera 2.10: tl-pkg, CaInfo de apt y salida en vivo"
 git push origin main
 ```

@@ -17,6 +17,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStreamReader
+import java.nio.file.Files
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest
@@ -75,6 +76,14 @@ import java.util.zip.ZipInputStream
  * carpeta real de la app en todos los scripts de usr/.
  * También se fija CURL_CA_BUNDLE/SSL_CERT_FILE al
  * etc/tls/cert.pem del bootstrap cuando existe.
+ *
+ * 2.6: fix al detector de enlaces de la 2.5. El 'reparar'
+ * decía "shebangs corregidos: 0" aunque había 113 por
+ * corregir: para saltar enlaces comparaba absolutePath con
+ * canonicalPath, pero en Android /data/user/0 es un enlace
+ * a /data/data, así que TODOS los archivos parecían enlaces
+ * y se saltaban todos. Ahora se usa Files.isSymbolicLink,
+ * que solo mira el archivo mismo.
  *
  * 1.0: solo /system/bin/sh de Android, sin instalar nada.
  * 2.0: comando `instalar` baja el bootstrap oficial de Termux
@@ -373,7 +382,7 @@ class MainActivity : Activity() {
 
     private fun estadoTexto(): String {
         val sb = StringBuilder()
-        sb.append("Estado Terminal Ligera 2.5\n")
+        sb.append("Estado Terminal Ligera 2.6\n")
         sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
         sb.append("\n")
         sb.append("  carpeta: ${filesDir.absolutePath}\n")
@@ -530,8 +539,12 @@ class MainActivity : Activity() {
                     continue
                 }
                 if (!f.isFile || !f.canRead()) continue
-                // Saltar enlaces: su ruta canónica es otra.
-                if (f.absolutePath != f.canonicalPath) continue
+                // Saltar enlaces simbólicos de verdad (ej. sh -> bash).
+                // OJO: NO comparar absolutePath con canonicalPath:
+                // en Android /data/user/0 es un enlace a /data/data,
+                // así que todos los archivos parecían enlaces y en
+                // la 2.5 se saltaban todos (0 corregidos).
+                if (Files.isSymbolicLink(f.toPath())) continue
                 try {
                     val primera = f.bufferedReader(Charsets.UTF_8).use { it.readLine() } ?: continue
                     if (!primera.startsWith("#!") || !primera.contains(viejo)) continue
@@ -941,7 +954,7 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 2.5 — por Nexos
+Terminal Ligera 2.6 — por Nexos
 Escribe 'help' para ver los comandos.
 Sin bootstrap, corre solo los comandos de Android.
 Con 'instalar' baja el bootstrap de Termux
@@ -966,6 +979,15 @@ Comandos propios de esta app:
   estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
+
+NUEVO en 2.6 — ahora sí se corrigen los shebangs:
+  La 2.5 decía "shebangs corregidos: 0" por un error mío:
+  para saltar enlaces comparaba la ruta con su ruta
+  canónica, pero /data/user/0 es un enlace a /data/data
+  en Android, así que todos los archivos parecían enlaces.
+  Ahora se detectan los enlaces de verdad y los 113
+  scripts quedan corregidos. Corre 'reparar' y luego
+  'pkg-instalar git'.
 
 NUEVO en 2.5 — 'pkg' ya funciona (shebangs corregidos):
   El bootstrap trae 113 scripts que empiezan con
@@ -1027,7 +1049,7 @@ Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 2.5
+Terminal Ligera 2.6
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
 Sin bootstrap: corre /system/bin/sh como usuario

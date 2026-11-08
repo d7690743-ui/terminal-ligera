@@ -18,6 +18,20 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.6 — ahora sí se corrigen los shebangs (fix 2.5)
+
+La 2.5 decía "shebangs corregidos: 0" aunque había 113 scripts
+por corregir. Causa: para saltar enlaces simbólicos se comparaba
+`absolutePath` con `canonicalPath`, pero en Android `/data/user/0`
+es un enlace a `/data/data`, así que TODOS los archivos parecían
+enlaces y se saltaban todos.
+
+Cambio en la 2.6 (versionCode 8): se usa
+`Files.isSymbolicLink()`, que solo mira si el archivo mismo es
+un enlace. Para probar: `reparar` (ahora debe decir "shebangs
+corregidos: 113" aprox.), luego `pkg-instalar git`,
+`git --version`, `muse-instalar`.
+
 ## 2.5 — 'pkg' ya funciona: shebangs de com.termux corregidos
 
 Con bash ya corriendo, `pkg-instalar git` moría con:
@@ -239,6 +253,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.5: reescribir shebangs com.termux"
+git commit -m "Terminal Ligera 2.6: fix detección de enlaces en shebangs"
 git push origin main
 ```

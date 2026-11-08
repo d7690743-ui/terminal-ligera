@@ -2,6 +2,7 @@ package com.nexos.terminal
 
 import android.app.Activity
 import android.os.Build
+import android.system.Os
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.inputmethod.EditorInfo
@@ -23,7 +24,17 @@ import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 
 /**
- * Terminal Ligera 2.0 — terminal propia, con instalador experimental.
+ * Terminal Ligera 2.1 — terminal propia, con instalador experimental.
+ *
+ * 2.1: arregla el error 13 (Permission denied) que salió en el
+ * teléfono al correr `bash --version`: el chmod de la 2.0 iba
+ * por el shell y sin verificar, y los enlaces de SYMLINKS.txt
+ * se creaban al revés y en la carpeta equivocada (0 enlaces).
+ * Ahora los permisos se ponen con Os.chmod directo (0755) y se
+ * verifica que bash sea ejecutable; si bash no arranca, los
+ * comandos caen al linker del sistema o al sh de Android en
+ * vez de quedarse atorados. El comando nuevo `reparar` vuelve
+ * a poner permisos y enlaces sin bajar el bootstrap otra vez.
  *
  * 1.0: solo /system/bin/sh de Android, sin instalar nada.
  * 2.0: comando `instalar` baja el bootstrap oficial de Termux
@@ -231,6 +242,20 @@ class MainActivity : Activity() {
                 scrollToBottom()
                 return
             }
+            "reparar" -> {
+                appendOutput("$ $cmd\n")
+                appendOutput("Reparando permisos y enlaces del bootstrap...\n")
+                scrollToBottom()
+                Thread {
+                    val reporte = repararPermisosYEnlaces()
+                    runOnUiThread {
+                        appendOutput(reporte)
+                        appendOutput(estadoTexto())
+                        scrollToBottom()
+                    }
+                }.start()
+                return
+            }
             "instalar", "bootstrap" -> {
                 appendOutput("$ $cmd\n")
                 appendOutput("Instalando bootstrap de Termux ($BOOTSTRAP_VERSION, ~32 MB)...\nNo cierres la app, tarda unos minutos.\n")
@@ -308,12 +333,15 @@ class MainActivity : Activity() {
 
     private fun estadoTexto(): String {
         val sb = StringBuilder()
-        sb.append("Estado Terminal Ligera 2.0\n")
+        sb.append("Estado Terminal Ligera 2.1\n")
         sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
         sb.append("\n")
         sb.append("  carpeta: ${filesDir.absolutePath}\n")
         if (isBootstrapInstalled()) {
             val prefix = prefixDir.absolutePath
+            val bashFile = File(prefix, "bin/bash")
+            sb.append("  bin/bash ejecutable: " + if (bashFile.canExecute()) "sí" else "NO — corre 'reparar'")
+            sb.append("\n")
             listOf("bin/bash", "bin/curl", "bin/apt", "bin/pkg", "bin/git", "bin/python3").forEach {
                 sb.append("  $it: " + if (File(prefix, it).exists()) "sí" else "no")
                 sb.append("\n")
@@ -338,7 +366,9 @@ class MainActivity : Activity() {
                 return
             }
             if (isBootstrapInstalled()) {
-                post("[el bootstrap ya estaba instalado. Escribe 'estado']\n")
+                post("[el bootstrap ya estaba instalado. Reparando permisos y enlaces...]\n")
+                post(repararPermisosYEnlaces())
+                post(estadoTexto())
                 return
             }
             val zipFile = File(filesDir, "bootstrap-aarch64.zip")
@@ -413,8 +443,11 @@ class MainActivity : Activity() {
             post("  $archivos archivos. Creando enlaces (SYMLINKS.txt)...\n")
             val enlaces = crearEnlaces()
             post("  $enlaces enlaces creados.\n")
-            post("Dando permisos de ejecución a bin/...\n")
-            runSystemSh("chmod -R +x \"${prefixDir.absolutePath}/bin\" \"${prefixDir.absolutePath}/libexec\" 2>/dev/null; true")
+            post("Dando permisos de ejecución a bin/ y libexec/...\n")
+            post(aplicarPermisosEjecucion())
+            if (!File(prefixDir, "bin/bash").canExecute()) {
+                post("[ojo: bin/bash sigue sin ser ejecutable tras el chmod. Corre 'reparar' y dime qué dice.]\n")
+            }
             zipFile.delete()
             bootstrapOkFile.writeText("bootstrap $BOOTSTRAP_VERSION instalado\n")
             post("Listo. Bootstrap instalado.\n")
@@ -428,7 +461,15 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Crea los enlaces de SYMLINKS.txt con `ln -sf` del shell de Android. */
+    /** Crea los enlaces de SYMLINKS.txt.
+     * Formato real del archivo (verificado con el zip oficial):
+     *   ARCHIVO_REAL ← ./ruta/del/enlace
+     * La izquierda es el archivo que ya existe y la derecha
+     * (con ./) es el enlace a crear, en esa carpeta, apuntando
+     * al archivo de la izquierda (mismo directorio).
+     * Ejemplo: `http←./lib/apt/methods/https` crea el enlace
+     * lib/apt/methods/https -> http. La 2.0 lo hacía al revés
+     * y en la carpeta raíz, por eso salieron 0 enlaces. */
     private fun crearEnlaces(): Int {
         var creados = 0
         try {
@@ -438,27 +479,70 @@ class MainActivity : Activity() {
                 if (!linea.contains("←")) return@forEachLine
                 val partes = linea.split("←")
                 if (partes.size != 2) return@forEachLine
-                val a = partes[0].trim()
-                val b = partes[1].trim()
-                if (a.isEmpty() || b.isEmpty()) return@forEachLine
-                // Un lado es el enlace (no existe como archivo) y el otro
-                // el destino (sí existe). Lo averiguamos, no lo suponemos.
-                val fileA = File(prefixDir, a.removePrefix("./"))
-                val fileB = File(prefixDir, b.removePrefix("./"))
-                val (enlace, destino) = when {
-                    !fileA.exists() && fileB.exists() -> Pair(a, b)
-                    !fileB.exists() && fileA.exists() -> Pair(b, a)
-                    else -> return@forEachLine
+                val real = partes[0].trim()
+                val enlaceRel = partes[1].trim().removePrefix("./")
+                if (real.isEmpty() || enlaceRel.isEmpty()) return@forEachLine
+                val enlace = File(prefixDir, enlaceRel)
+                if (enlace.exists()) return@forEachLine
+                val realFile = File(prefixDir, real)
+                if (!realFile.exists()) return@forEachLine
+                try {
+                    enlace.parentFile?.mkdirs()
+                    val rel = enlace.parentFile!!.toPath().relativize(realFile.toPath()).toString()
+                    Os.symlink(rel, enlace.absolutePath)
+                    creados++
+                } catch (e: Exception) {
+                    // Se cuenta solo lo que sí se creó.
                 }
-                val ok = runSystemSh(
-                    "ln -sf \"$destino\" \"${prefixDir.absolutePath}/${enlace.removePrefix("./")}\""
-                )
-                if (ok) creados++
             }
         } catch (e: Exception) {
-            // Los enlaces que falten se reportan en el conteo, no se rompe todo.
+            // Los enlaces que falten se reportan en el conteo.
         }
         return creados
+    }
+
+    /** Pone 0755 con Os.chmod directo (sin pasar por el shell) a
+     * todo lo de bin/ y libexec/. Devuelve un reporte con cuántos
+     * archivos se arreglaron y si bash quedó ejecutable. En la
+     * 2.0 esto se hacía con un `chmod -R +x` por el shell, sin
+     * verificar, y en el teléfono el bash quedó sin permiso de
+     * ejecución (error 13 al correr `bash --version`). */
+    private fun aplicarPermisosEjecucion(): String {
+        var total = 0
+        var errores = 0
+        fun arreglar(f: File) {
+            try {
+                if (f.isDirectory) {
+                    f.listFiles()?.forEach { arreglar(it) }
+                } else {
+                    Os.chmod(f.absolutePath, 493) // 0755
+                    total++
+                }
+            } catch (e: Exception) {
+                errores++
+            }
+        }
+        listOf(File(prefixDir, "bin"), File(prefixDir, "libexec")).forEach {
+            if (it.exists()) arreglar(it)
+        }
+        val bashOk = File(prefixDir, "bin/bash").canExecute()
+        return "  permisos 0755 aplicados a $total archivos ($errores errores).\n" +
+            "  bin/bash ejecutable: " + if (bashOk) "sí\n" else "NO\n"
+    }
+
+    /** Repara permisos y enlaces sin bajar el bootstrap otra vez. */
+    private fun repararPermisosYEnlaces(): String {
+        if (!prefixDir.exists()) return "[no hay bootstrap instalado. Corre 'instalar' primero.]\n"
+        val sb = StringBuilder()
+        sb.append(aplicarPermisosEjecucion())
+        val enlaces = crearEnlaces()
+        sb.append("  enlaces creados: $enlaces\n")
+        val bashOk = File(prefixDir, "bin/bash").canExecute()
+        sb.append(
+            if (bashOk) "Listo. Prueba 'bash --version'.\n"
+            else "[bash sigue sin ejecutarse. Prueba 'bash --version' y mándame el error exacto.]\n"
+        )
+        return sb.toString()
     }
 
     /** Corre un comando corto con /system/bin/sh. Devuelve true si salió con 0. */
@@ -487,27 +571,61 @@ class MainActivity : Activity() {
     private fun runShellWithTimeout(cmd: String, timeoutSeconds: Long, maxChars: Int): String {
         return try {
             val bootstrap = isBootstrapInstalled()
-            val shell = if (bootstrap) File(prefixDir, "bin/bash").absolutePath else "/system/bin/sh"
-            val pb = ProcessBuilder(shell, "-c", cmd)
-            pb.directory(currentDir)
-            pb.redirectErrorStream(true)
-            if (bootstrap) {
-                val env = pb.environment()
-                val prefix = prefixDir.absolutePath
-                val home = filesDir.absolutePath
-                env["HOME"] = home
-                env["PREFIX"] = prefix
-                env["TMPDIR"] = "$prefix/tmp"
-                env["TERM"] = "xterm-256color"
-                env["LANG"] = "en_US.UTF-8"
-                env["PATH"] = "$prefix/bin:$prefix/bin/applets:/system/bin:/system/xbin"
-                env["LD_LIBRARY_PATH"] = "$prefix/lib"
-                // Sin LD_PRELOAD a propósito: en la 2.0 se prueba sin él.
-                // Si los scripts de Termux fallan por sus rutas escritas,
-                // el error saldrá en pantalla y se ajusta en la 2.1.
+            val bashPath = File(prefixDir, "bin/bash").absolutePath
+            // Candidatos de shell, en orden. En la 2.0 solo se intentaba
+            // el bash del bootstrap y si fallaba con permiso denegado
+            // (error 13) todo el comando moría. Ahora se cae al linker
+            // del sistema (que lee el binario en vez de ejecutarlo, y
+            // funciona aunque el archivo no tenga permiso de ejecución)
+            // y luego al sh de Android, y se avisa cuál se usó.
+            val intentos: List<List<String>> = if (bootstrap) {
+                listOf(
+                    listOf(bashPath, "-c", cmd),
+                    listOf("/system/bin/linker64", bashPath, "-c", cmd),
+                    listOf("/system/bin/sh", "-c", cmd)
+                )
+            } else {
+                listOf(listOf("/system/bin/sh", "-c", cmd))
             }
-            val process = pb.start()
+            fun nuevoPb(args: List<String>): ProcessBuilder {
+                val p = ProcessBuilder(args)
+                p.directory(currentDir)
+                p.redirectErrorStream(true)
+                if (bootstrap) {
+                    val env = p.environment()
+                    val prefix = prefixDir.absolutePath
+                    val home = filesDir.absolutePath
+                    env["HOME"] = home
+                    env["PREFIX"] = prefix
+                    env["TMPDIR"] = "$prefix/tmp"
+                    env["TERM"] = "xterm-256color"
+                    env["LANG"] = "en_US.UTF-8"
+                    env["PATH"] = "$prefix/bin:$prefix/bin/applets:/system/bin:/system/xbin"
+                    env["LD_LIBRARY_PATH"] = "$prefix/lib"
+                    // Sin LD_PRELOAD a propósito: en la 2.0 se prueba sin él.
+                }
+                return p
+            }
+            var process: Process? = null
+            var shellUsado = ""
+            var ultimoError: Exception? = null
+            for (intento in intentos) {
+                try {
+                    process = nuevoPb(intento).start()
+                    shellUsado = intento[0]
+                    break
+                } catch (e: Exception) {
+                    ultimoError = e
+                }
+            }
+            val proc = process
+                ?: return "[error: no se pudo arrancar ningún shell: ${ultimoError?.message}]\n"
+            val process = proc
             val sb = StringBuilder()
+            if (bootstrap && shellUsado != bashPath) {
+                val nombre = if (shellUsado.contains("linker64")) "linker del sistema" else "sh de Android"
+                sb.append("[aviso: bash no arrancó (permiso denegado), usando $nombre. Corre 'reparar']\n")
+            }
             val lector = Thread {
                 try {
                     val reader = BufferedReader(InputStreamReader(process.inputStream))
@@ -605,7 +723,7 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 2.0 — por Nexos
+Terminal Ligera 2.1 — por Nexos
 Escribe 'help' para ver los comandos.
 Sin bootstrap, corre solo los comandos de Android.
 Con 'instalar' baja el bootstrap de Termux
@@ -630,6 +748,12 @@ Comandos propios de esta app:
   estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
+
+NUEVO en 2.1 — arregla el error 13:
+  reparar        — vuelve a poner permisos (0755) y
+                   enlaces del bootstrap sin bajarlo otra
+                   vez. Úsalo si 'bash --version' te dice
+                   Permission denied.
 
 NUEVO en 2.0 — instalar lo que falta:
   instalar       — baja y descomprime el bootstrap oficial
@@ -656,7 +780,7 @@ Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 2.0
+Terminal Ligera 2.1
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
 Sin bootstrap: corre /system/bin/sh como usuario

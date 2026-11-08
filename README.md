@@ -18,6 +18,35 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.1 — arregla el error 13 (Permission denied)
+
+En el teléfono, `bash --version` falló con `error=13, Permission denied`
+aunque el bootstrap sí se había instalado bien (SHA correcto, 3,480
+archivos, bash/curl/apt/pkg presentes). Dos causas:
+
+1. **Permisos:** la 2.0 ponía el permiso de ejecución con un
+   `chmod -R +x` por el shell, sin verificar si funcionó. En la 2.1
+   se pone con `Os.chmod` directo (0755) a todo `bin/` y `libexec/`
+   y se verifica que `bin/bash` quede ejecutable.
+2. **Enlaces:** `SYMLINKS.txt` tiene el formato
+   `ARCHIVO_REAL ← ./ruta/del/enlace` (la izquierda es el archivo
+   que existe, la derecha el enlace a crear en esa carpeta). La 2.0
+   lo leía al revés y en la raíz, por eso salieron 0 enlaces.
+
+Cambios en la 2.1 (versionCode 3):
+- Comando nuevo `reparar`: vuelve a poner permisos y enlaces sin
+  bajar el bootstrap otra vez. Si `instalar` se corre con el
+  bootstrap ya instalado, también repara en vez de salir.
+- Si bash no arranca, los comandos caen al linker del sistema
+  (`/system/bin/linker64`, que lee el binario en vez de ejecutarlo)
+  y luego al `sh` de Android, avisando cuál se usó, en vez de
+  quedarse atorados.
+- `estado` ahora muestra si `bin/bash` es ejecutable.
+
+Para probar en el teléfono (con el bootstrap de la 2.0 ya instalado,
+no hace falta reinstalar): `reparar`, luego `bash --version`,
+`curl --version`, `pkg-instalar git`, `git --version`.
+
 ## 2.0 — instalar lo que falta (experimental)
 
 En la app, en orden:
@@ -102,6 +131,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.0: instalador bootstrap + muse-instalar"
+git commit -m "Terminal Ligera 2.1: reparar permisos y enlaces (error 13)"
 git push origin main
 ```

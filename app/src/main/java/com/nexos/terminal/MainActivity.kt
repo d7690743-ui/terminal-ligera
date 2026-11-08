@@ -109,6 +109,19 @@ import java.util.zip.ZipInputStream
  * y un apt.conf propio con APT_CONFIG (apt trae
  * .../usr/lib compilado, que es el dir de methods).
  *
+ * 2.9: los methods de apt no tenían permiso de ejecución.
+ * Con la 2.8 pkg ya corre (probó los mirrors y eligió
+ * uno), pero apt moría con "Method https did not start
+ * correctly". Causa: el method https es un enlace a http
+ * (SYMLINKS.txt) y http vive en lib/apt/methods/, fuera
+ * de bin/ y libexec/, que eran las únicas carpetas con
+ * chmod 0755. Al descomprimir con ZipInputStream se pierde
+ * el +x, así que http quedaba sin ejecutar. Ahora
+ * aplicarPermisosEjecucion también pone 0755 a todo
+ * archivo que sea binario ELF o empiece con #! en todo
+ * el bootstrap (119 fuera de bin/ y libexec/, verificado
+ * en el zip oficial), y 'reparar' verifica los methods.
+ *
  * 1.0: solo /system/bin/sh de Android, sin instalar nada.
  * 2.0: comando `instalar` baja el bootstrap oficial de Termux
  * (aarch64, ~32 MB, SHA-256 verificado) y lo descomprime en la
@@ -406,7 +419,7 @@ class MainActivity : Activity() {
 
     private fun estadoTexto(): String {
         val sb = StringBuilder()
-        sb.append("Estado Terminal Ligera 2.8\n")
+        sb.append("Estado Terminal Ligera 2.9\n")
         sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
         sb.append("\n")
         sb.append("  carpeta: ${filesDir.absolutePath}\n")
@@ -679,8 +692,46 @@ class MainActivity : Activity() {
         listOf(File(prefixDir, "bin"), File(prefixDir, "libexec")).forEach {
             if (it.exists()) arreglar(it)
         }
+        // 2.9: los ejecutables FUERA de bin/ y libexec/ (147
+        // archivos ELF o con #! en el zip oficial, incluidos los
+        // 119 que ya traían +x: lib/apt/methods/, lib/bash/...).
+        // Al descomprimir con ZipInputStream se pierde el +x, así
+        // que el method https de apt (enlace a http) no arrancaba.
+        // Se pone 0755 a todo archivo que sea binario ELF o
+        // empiece con #! en todo el bootstrap.
+        var fuera = 0
+        val pila = ArrayDeque<File>()
+        pila.add(prefixDir)
+        while (pila.isNotEmpty()) {
+            val dir = pila.removeFirst()
+            val hijos = dir.listFiles() ?: continue
+            for (f in hijos) {
+                if (f.isDirectory) {
+                    // bin/ y libexec/ ya se hicieron arriba: no
+                    // contarlos otra vez como "fuera".
+                    if (dir == prefixDir && (f.name == "bin" || f.name == "libexec")) continue
+                    pila.add(f)
+                    continue
+                }
+                if (!f.isFile || !f.canRead()) continue
+                if (Files.isSymbolicLink(f.toPath())) continue
+                try {
+                    val cab = ByteArray(4)
+                    val n = FileInputStream(f).use { it.read(cab) }
+                    val esElf = n >= 4 && cab[0] == 0x7f.toByte() && cab[1] == 'E'.code.toByte() &&
+                        cab[2] == 'L'.code.toByte() && cab[3] == 'F'.code.toByte()
+                    val esScript = n >= 2 && cab[0] == '#'.code.toByte() && cab[1] == '!'.code.toByte()
+                    if (!esElf && !esScript) continue
+                    Os.chmod(f.absolutePath, 493) // 0755
+                    fuera++
+                } catch (e: Exception) {
+                    errores++
+                }
+            }
+        }
         val bashOk = File(prefixDir, "bin/bash").canExecute()
         return "  permisos 0755 aplicados a $total archivos ($errores errores).\n" +
+            "  ejecutables fuera de bin/ y libexec/: $fuera\n" +
             "  bin/bash ejecutable: " + if (bashOk) "sí\n" else "NO\n"
     }
 
@@ -776,6 +827,7 @@ class MainActivity : Activity() {
         val (archivosRutas, reemplazosRutas) = reescribirRutasEnTextos()
         sb.append("  rutas en textos: $reemplazosRutas reemplazos en $archivosRutas archivos\n")
         sb.append(prepararAptConf())
+        sb.append("  methods de apt: " + verificarMethodsApt() + "\n")
         File(prefixDir, "tmp").mkdirs()
         File(prefixDir, "var/lib/apt/lists").mkdirs()
         File(prefixDir, "var/cache/apt/archives").mkdirs()
@@ -904,6 +956,25 @@ class MainActivity : Activity() {
             "  apt.conf: listo ($p/etc/apt/apt.conf)\n"
         } catch (e: Exception) {
             "  apt.conf: NO se pudo crear (${e.message})\n"
+        }
+    }
+
+    /** Verifica que los methods de apt existan y se puedan
+     *  ejecutar (2.9). El method https es un enlace a http
+     *  (SYMLINKS.txt); si http no tiene +x, apt muere con
+     *  "Method https did not start correctly". */
+    private fun verificarMethodsApt(): String {
+        return try {
+            val dir = File(prefixDir, "lib/apt/methods")
+            if (!dir.exists()) return "NO (no hay lib/apt/methods)"
+            val http = File(dir, "http")
+            val https = File(dir, "https")
+            val httpOk = http.exists() && http.canExecute()
+            val httpsOk = https.exists() && https.canExecute()
+            if (httpOk && httpsOk) "OK (http y https ejecutables)"
+            else "MAL (http: ${if (httpOk) "OK" else "NO"}, https: ${if (httpsOk) "OK" else "NO"})"
+        } catch (e: Exception) {
+            "NO (${e.message})"
         }
     }
 
@@ -1133,7 +1204,7 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 2.8 — por Nexos
+Terminal Ligera 2.9 — por Nexos
 Escribe 'help' para ver los comandos.
 Sin bootstrap, corre solo los comandos de Android.
 Con 'instalar' baja el bootstrap de Termux
@@ -1158,6 +1229,17 @@ Comandos propios de esta app:
   estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
+
+NUEVO en 2.9 — los methods de apt ya se pueden ejecutar:
+  Con la 2.8 pkg ya corre y elige mirror, pero apt moría
+  con "Method https did not start correctly": el method
+  https es un enlace a http, y http vive en
+  lib/apt/methods/, fuera de bin/ y libexec/, las únicas
+  carpetas con permiso de ejecución. Ahora 'reparar' pone
+  0755 a todo binario ELF o script con #! en todo el
+  bootstrap, y verifica los methods. Corre 'reparar'
+  (debe decir "methods de apt: OK") y luego
+  'pkg-instalar git'.
 
 NUEVO en 2.8 — la ruta de Termux DENTRO de los scripts:
   El shebang era solo la línea 1: el script pkg trae la
@@ -1248,7 +1330,7 @@ Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 2.8
+Terminal Ligera 2.9
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
 Sin bootstrap: corre /system/bin/sh como usuario

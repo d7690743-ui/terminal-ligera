@@ -18,6 +18,28 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.9 — los methods de apt ya se pueden ejecutar (fix 2.8)
+
+Con la 2.8 `pkg` ya corre (prueba los mirrors y elige uno),
+pero `apt update` moría con "Method https did not start
+correctly" y "E: Method .../lib/apt/methods/https did not
+start correctly". Causa: el method `https` es un enlace a
+`http` (SYMLINKS.txt) y `http` vive en `lib/apt/methods/`,
+fuera de `bin/` y `libexec/`, que eran las únicas carpetas
+con chmod 0755. Al descomprimir con `ZipInputStream` se
+pierde el `+x`, así que `http` quedaba sin ejecutar y apt no
+podía arrancar el method.
+
+Cambio en la 2.9 (versionCode 11): `aplicarPermisosEjecucion`
+ahora también pone 0755 a todo archivo que sea binario ELF
+o empiece con `#!` en todo el bootstrap (147 archivos en el
+zip oficial, incluidos los 119 que ya traían `+x`:
+`lib/apt/methods/` 7, `lib/bash/` 40, `lib/gawk/` 12...), y
+`reparar` verifica los methods ("methods de apt: OK").
+
+Para probar: `reparar` (debe decir "methods de apt: OK"),
+luego `pkg-instalar git`, `git --version`.
+
 ## 2.8 — la ruta de Termux DENTRO de los scripts (fix 2.7)
 
 El shebang era solo la línea 1: el script `pkg` trae la ruta
@@ -314,6 +336,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.8: reescribir ruta Termux en textos + DPKG_ADMINDIR + apt.conf"
+git commit -m "Terminal Ligera 2.9: permiso de ejecución a methods de apt y ejecutables fuera de bin"
 git push origin main
 ```

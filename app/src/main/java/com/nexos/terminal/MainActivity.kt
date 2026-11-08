@@ -620,7 +620,6 @@ class MainActivity : Activity() {
             }
             val proc = process
                 ?: return "[error: no se pudo arrancar ningún shell: ${ultimoError?.message}]\n"
-            val process = proc
             val sb = StringBuilder()
             if (bootstrap && shellUsado != bashPath) {
                 val nombre = if (shellUsado.contains("linker64")) "linker del sistema" else "sh de Android"
@@ -628,7 +627,7 @@ class MainActivity : Activity() {
             }
             val lector = Thread {
                 try {
-                    val reader = BufferedReader(InputStreamReader(process.inputStream))
+                    val reader = BufferedReader(InputStreamReader(proc.inputStream))
                     var line: String?
                     var total = 0
                     while (reader.readLine().also { line = it } != null) {
@@ -646,9 +645,9 @@ class MainActivity : Activity() {
                 }
             }
             lector.start()
-            val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            val finished = proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
             if (!finished) {
-                process.destroyForcibly()
+                proc.destroyForcibly()
                 lector.join(2000)
                 sb.append("[tiempo agotado: $timeoutSeconds s, comando detenido]\n")
                 return sb.toString()
@@ -656,7 +655,7 @@ class MainActivity : Activity() {
             lector.join(5000)
             if (sb.isEmpty()) {
                 val code = try {
-                    process.exitValue()
+                    proc.exitValue()
                 } catch (e: Exception) {
                     -1
                 }

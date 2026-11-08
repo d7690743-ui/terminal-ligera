@@ -689,7 +689,7 @@ class MainActivity : Activity() {
      * carga el binario y lo corre sin que un bash intermedio tenga
      * que volver a ejecutarlo (eso era lo que moría en la 2.3). */
     private fun intentoLinkerDirecto(cmd: String): List<String>? {
-        if (cmd.any { it in "|&;<>()$`"'*?#~\n" }) return null
+        if (cmd.any { it in "|&;<>()\$`\"'*?#~\n" }) return null
         val partes = cmd.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
         if (partes.isEmpty()) return null
         val nombre = partes[0]

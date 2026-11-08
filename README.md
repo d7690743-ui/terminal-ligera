@@ -18,6 +18,63 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.3 — firma estable: se instala y actualiza normal
+
+Cada build de Actions salía con un certificado distinto (cada
+runner genera su propio debug keystore) y Android no dejaba
+actualizar sin desinstalar. Al desinstalar se borraba el
+bootstrap y había que bajarlo otra vez. Verificado: los APK
+1.0, 2.0 y 2.1 traían certificados SHA-256 distintos.
+
+Cambios en la 2.3 (versionCode 5):
+- Una sola llave en el repo: `app/terminal-ligera.keystore`
+  (PKCS12, alias `androiddebugkey`, contraseña `android`,
+  certificado SHA-256
+  FF:45:B3:64:94:13:82:E5:5F:7E:DA:2C:01:85:B8:D5:3C:28:24:17:3F:55:DD:E1:09:D8:08:AD:34:AB:51:59,
+  válido hasta 2054). Es una llave de desarrollo, no de Play
+  Store: quien la tenga puede firmar actualizaciones de esta
+  app, por eso solo se usa para Terminal Ligera.
+- El workflow ahora compila en release (`assembleRelease`)
+  con esa llave y sube el artifact `app-release`.
+- Resultado: el APK se instala con el instalador normal de
+  Android y las nuevas versiones actualizan sin desinstalar,
+  conservando el bootstrap ya instalado.
+
+OJO al actualizar desde una versión vieja: la 2.3 trae firma
+nueva, distinta a la de la 1.0/2.0/2.1, así que la PRIMERA
+vez sí hay que desinstalar la vieja e instalar la 2.3. Desde
+la 2.3 en adelante, ya actualiza sola.
+
+## 2.2 — enlaces en su carpeta + prueba bash por linker
+
+El `reparar` de la 2.1 puso los permisos (bash ya decía
+ejecutable: sí) pero los enlaces siguieron en 0 y bash tampoco
+arrancó por el linker: `CANNOT LINK EXECUTABLE .../bin/bash:
+library "libreadline.so.8" not found`. Dos lecciones:
+
+1. **Los enlaces:** el archivo real vive en la MISMA carpeta del
+   enlace (el real `libreadline.so.8.3` está en `lib/` para el
+   enlace `lib/libreadline.so.8`). Mi fix de la 2.1 lo buscaba
+   en la raíz de `usr/` y por eso resolvía 0 de 1213 líneas
+   (verificado contra el zip oficial; con la carpeta correcta
+   resuelven 1106 directas y el resto por cadenas, con varias
+   pasadas).
+2. **Ejecutar directo no se puede:** aunque bash tenga 0755,
+   Android bloquea ejecutar binarios creados por la app en su
+   carpeta (error 13). La vía real es el linker del sistema.
+
+Cambios en la 2.2 (versionCode 4):
+- `crearEnlaces` busca el real en la carpeta del enlace (con
+  respaldo en `usr/`) y hace hasta 3 pasadas para las cadenas.
+- `reparar` ahora reporta si existe `lib/libreadline.so.8` y
+  prueba bash por el linker (`linker64 bash -c "echo ..."`)
+  diciendo si corre.
+- El aviso del fallback ya no manda a `reparar` cuando el
+  linker sí funciona.
+
+Para probar (bootstrap ya instalado, no se re-baja nada):
+`reparar` y luego `bash --version`.
+
 ## 2.1 — arregla el error 13 (Permission denied)
 
 En el teléfono, `bash --version` falló con `error=13, Permission denied`
@@ -131,6 +188,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.1: reparar permisos y enlaces (error 13)"
+git commit -m "Terminal Ligera 2.3: firma estable + build release"
 git push origin main
 ```

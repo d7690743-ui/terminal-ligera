@@ -11,14 +11,38 @@ android {
         applicationId 'com.nexos.terminal'
         minSdk 24
         targetSdk 35
-        versionCode 3
-        versionName '2.1'
+        versionCode 5
+        versionName '2.3'
+    }
+
+    // Firma estable: una sola llave para todos los builds (2.3).
+    // Antes cada runner de GitHub generaba su propio debug keystore
+    // y cada APK salía con certificado distinto, así que Android
+    // no dejaba actualizar sin desinstalar (y al desinstalar se
+    // borraba el bootstrap). Esta llave vive en el repo
+    // (app/terminal-ligera.keystore, PKCS12, alias androiddebugkey,
+    // contraseña "android", como el debug keystore estándar).
+    // Es una llave de desarrollo, no de Play Store: quien la tenga
+    // puede firmar actualizaciones de esta app, por eso solo se
+    // usa para Terminal Ligera.
+    signingConfigs {
+        release {
+            storeFile file("terminal-ligera.keystore")
+            storePassword "android"
+            keyAlias "androiddebugkey"
+            keyPassword "android"
+            storeType "PKCS12"
+        }
     }
 
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            signingConfig signingConfigs.release
+        }
+        debug {
+            signingConfig signingConfigs.release
         }
     }
     compileOptions {

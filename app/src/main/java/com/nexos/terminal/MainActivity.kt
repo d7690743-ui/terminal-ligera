@@ -96,6 +96,19 @@ import java.util.zip.ZipInputStream
  * que ya la instalaron. 'reparar' ahora verifica también
  * que el intérprete del shebang de pkg exista de verdad.
  *
+ * 2.8: la ruta de Termux DENTRO de los scripts. El shebang
+ * era solo la línea 1: el script pkg tiene la ruta de
+ * com.termux 22 veces en el cuerpo (source de
+ * termux-setup-package-manager, mirrors, sources.list,
+ * cache...) y hay 277 archivos de texto con la ruta (6,191
+ * apariciones en total, verificado en el zip oficial).
+ * Nuevo reescribirRutasEnTextos: reemplaza el prefijo en
+ * todos los textos (salta binarios por el byte NUL, como
+ * grep -I) y también la ruta de cache. Además: DPKG_ADMINDIR
+ * por env (dpkg trae el admindir de com.termux compilado)
+ * y un apt.conf propio con APT_CONFIG (apt trae
+ * .../usr/lib compilado, que es el dir de methods).
+ *
  * 1.0: solo /system/bin/sh de Android, sin instalar nada.
  * 2.0: comando `instalar` baja el bootstrap oficial de Termux
  * (aarch64, ~32 MB, SHA-256 verificado) y lo descomprime en la
@@ -393,7 +406,7 @@ class MainActivity : Activity() {
 
     private fun estadoTexto(): String {
         val sb = StringBuilder()
-        sb.append("Estado Terminal Ligera 2.7\n")
+        sb.append("Estado Terminal Ligera 2.8\n")
         sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
         sb.append("\n")
         sb.append("  carpeta: ${filesDir.absolutePath}\n")
@@ -508,6 +521,10 @@ class MainActivity : Activity() {
             post("Corrigiendo rutas de com.termux en los scripts...\n")
             val shebangs = reescribirShebangs()
             post("  $shebangs shebangs corregidos.\n")
+            post("Reescribiendo la ruta de Termux en los textos...\n")
+            val (archivosRutas, reemplazosRutas) = reescribirRutasEnTextos()
+            post("  $reemplazosRutas reemplazos en $archivosRutas archivos.\n")
+            post(prepararAptConf())
             if (!File(prefixDir, "bin/bash").canExecute()) {
                 post("[ojo: bin/bash sigue sin ser ejecutable tras el chmod. Corre 'reparar' y dime qué dice.]\n")
             }
@@ -685,6 +702,12 @@ class MainActivity : Activity() {
             env["LANG"] = "en_US.UTF-8"
             env["PATH"] = "$prefix/bin:$prefix/bin/applets:/system/bin:/system/xbin"
             env["LD_LIBRARY_PATH"] = "$prefix/lib"
+                    // dpkg y apt con prefijo de com.termux compilado (2.8):
+                    // el admindir de dpkg se le pasa por env y la
+                    // config de apt por APT_CONFIG (apt.conf propio).
+                    env["DPKG_ADMINDIR"] = "$prefix/var/lib/dpkg"
+                    val aptConf = File(prefix, "etc/apt/apt.conf")
+                    if (aptConf.exists()) env["APT_CONFIG"] = aptConf.absolutePath
             val proc = pb.start()
             val termino = proc.waitFor(15, TimeUnit.SECONDS)
             if (!termino) {
@@ -718,6 +741,12 @@ class MainActivity : Activity() {
             env["LANG"] = "en_US.UTF-8"
             env["PATH"] = "$prefix/bin:$prefix/bin/applets:/system/bin:/system/xbin"
             env["LD_LIBRARY_PATH"] = "$prefix/lib"
+                    // dpkg y apt con prefijo de com.termux compilado (2.8):
+                    // el admindir de dpkg se le pasa por env y la
+                    // config de apt por APT_CONFIG (apt.conf propio).
+                    env["DPKG_ADMINDIR"] = "$prefix/var/lib/dpkg"
+                    val aptConf = File(prefix, "etc/apt/apt.conf")
+                    if (aptConf.exists()) env["APT_CONFIG"] = aptConf.absolutePath
             val proc = pb.start()
             val termino = proc.waitFor(15, TimeUnit.SECONDS)
             if (!termino) {
@@ -744,6 +773,12 @@ class MainActivity : Activity() {
         val shebangs = reescribirShebangs()
         sb.append("  shebangs corregidos: $shebangs\n")
         sb.append("  shebang de pkg: " + verificarShebangPkg() + "\n")
+        val (archivosRutas, reemplazosRutas) = reescribirRutasEnTextos()
+        sb.append("  rutas en textos: $reemplazosRutas reemplazos en $archivosRutas archivos\n")
+        sb.append(prepararAptConf())
+        File(prefixDir, "tmp").mkdirs()
+        File(prefixDir, "var/lib/apt/lists").mkdirs()
+        File(prefixDir, "var/cache/apt/archives").mkdirs()
         sb.append(
             "  enlace libreadline.so.8: " +
                 if (File(prefixDir, "lib/libreadline.so.8").exists()) "sí\n" else "NO\n"
@@ -772,6 +807,103 @@ class MainActivity : Activity() {
             else "MAL (no existe: $interprete)"
         } catch (e: Exception) {
             "NO (${e.message})"
+        }
+    }
+
+    /** Reescribe la ruta de Termux en TODOS los archivos de
+     *  texto del bootstrap, no solo en el shebang (2.8). El
+     *  script pkg trae la ruta 22 veces en el cuerpo y hay
+     *  277 textos con ella (6,191 apariciones). Salta enlaces
+     *  y binarios (si el archivo tiene un byte NUL, como
+     *  grep -I, no se toca). Devuelve (archivos, reemplazos).
+     *  Reemplazos, en orden: el doble /files que dejó la 2.6,
+     *  "/data/data/com.termux/files" -> carpeta de la app,
+     *  "/data/data/com.termux/cache" -> cache de la app, y la
+     *  ruta pelada "/data/data/com.termux" -> carpeta de datos
+     *  de la app. */
+    private fun reescribirRutasEnTextos(): Pair<Int, Int> {
+        var archivos = 0
+        var reemplazos = 0
+        val nuevo = filesDir.absolutePath
+        val doble = nuevo + "/files"
+        val cache = cacheDir.absolutePath
+        val datosApp = filesDir.parentFile?.absolutePath ?: nuevo
+        val pares = listOf(
+            doble to nuevo,
+            "/data/data/com.termux/files" to nuevo,
+            "/data/data/com.termux/cache" to cache,
+            "/data/data/com.termux" to datosApp
+        )
+        if (!prefixDir.exists()) return Pair(0, 0)
+        val pila = ArrayDeque<File>()
+        pila.add(prefixDir)
+        while (pila.isNotEmpty()) {
+            val dir = pila.removeFirst()
+            val hijos = dir.listFiles() ?: continue
+            for (f in hijos) {
+                if (f.isDirectory) {
+                    pila.add(f)
+                    continue
+                }
+                if (!f.isFile || !f.canRead()) continue
+                if (Files.isSymbolicLink(f.toPath())) continue
+                try {
+                    val datos = f.readBytes()
+                    // Binario: tiene byte NUL, no se toca.
+                    if (datos.contains(0.toByte())) continue
+                    var texto = String(datos, Charsets.ISO_8859_1)
+                    var cambios = 0
+                    for ((viejo, repl) in pares) {
+                        if (!texto.contains(viejo)) continue
+                        cambios += texto.split(viejo).size - 1
+                        texto = texto.replace(viejo, repl)
+                    }
+                    if (cambios == 0) continue
+                    f.writeBytes(texto.toByteArray(Charsets.ISO_8859_1))
+                    archivos++
+                    reemplazos += cambios
+                } catch (e: Exception) {
+                    // Seguir con el siguiente archivo.
+                }
+            }
+        }
+        return Pair(archivos, reemplazos)
+    }
+
+    /** Crea el apt.conf propio de la app (2.8). apt trae
+     *  compilada la ruta .../usr/lib (el dir de methods) y
+     *  busca su config en el prefijo de com.termux; con
+     *  APT_CONFIG apuntando a este archivo, todos los Dir
+     *  quedan en nuestro prefijo. */
+    private fun prepararAptConf(): String {
+        return try {
+            val dir = File(prefixDir, "etc/apt")
+            dir.mkdirs()
+            val conf = File(dir, "apt.conf")
+            val p = prefixDir.absolutePath
+            conf.writeText(
+                "Dir::Etc \"$p/etc/apt\";\n" +
+                "Dir::Etc::sourcelist \"sources.list\";\n" +
+                "Dir::Etc::sourceparts \"sources.list.d\";\n" +
+                "Dir::Etc::main \"apt.conf\";\n" +
+                "Dir::Etc::parts \"apt.conf.d\";\n" +
+                "Dir::Etc::preferences \"preferences\";\n" +
+                "Dir::Etc::preferencesparts \"preferences.d\";\n" +
+                "Dir::Etc::trusted \"trusted.gpg\";\n" +
+                "Dir::Etc::trustedparts \"trusted.gpg.d\";\n" +
+                "Dir::State \"$p/var/lib/apt\";\n" +
+                "Dir::State::lists \"lists/\";\n" +
+                "Dir::State::status \"$p/var/lib/dpkg/status\";\n" +
+                "Dir::Cache \"$p/var/cache/apt\";\n" +
+                "Dir::Cache::archives \"archives/\";\n" +
+                "Dir::Cache::srcpkgcache \"srcpkgcache.bin\";\n" +
+                "Dir::Cache::pkgcache \"pkgcache.bin\";\n" +
+                "Dir::Bin::methods \"$p/lib/apt/methods\";\n" +
+                "Dir::Bin::dpkg \"$p/bin/dpkg\";\n"
+            )
+            "  apt.conf: listo ($p/etc/apt/apt.conf)\n"
+        } catch (e: Exception) {
+            "  apt.conf: NO se pudo crear (${e.message})\n"
         }
     }
 
@@ -863,6 +995,12 @@ class MainActivity : Activity() {
                     env["LANG"] = "en_US.UTF-8"
                     env["PATH"] = "$prefix/bin:$prefix/bin/applets:/system/bin:/system/xbin"
                     env["LD_LIBRARY_PATH"] = "$prefix/lib"
+                    // dpkg y apt con prefijo de com.termux compilado (2.8):
+                    // el admindir de dpkg se le pasa por env y la
+                    // config de apt por APT_CONFIG (apt.conf propio).
+                    env["DPKG_ADMINDIR"] = "$prefix/var/lib/dpkg"
+                    val aptConf = File(prefix, "etc/apt/apt.conf")
+                    if (aptConf.exists()) env["APT_CONFIG"] = aptConf.absolutePath
                     // Certificados del bootstrap (2.5): curl y apt
                     // traen compilada la ruta de com.termux para el
                     // paquete de certificados; aquí sí existe en
@@ -995,7 +1133,7 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 2.7 — por Nexos
+Terminal Ligera 2.8 — por Nexos
 Escribe 'help' para ver los comandos.
 Sin bootstrap, corre solo los comandos de Android.
 Con 'instalar' baja el bootstrap de Termux
@@ -1020,6 +1158,15 @@ Comandos propios de esta app:
   estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
+
+NUEVO en 2.8 — la ruta de Termux DENTRO de los scripts:
+  El shebang era solo la línea 1: el script pkg trae la
+  ruta de com.termux 22 veces en el cuerpo, y hay 277
+  archivos de texto con esa ruta. Ahora 'reparar' la
+  reescribe en todos los textos (sin tocar binarios) y
+  además pone DPKG_ADMINDIR y un apt.conf propio para
+  que apt y dpkg no busquen en com.termux. Corre
+  'reparar' y luego 'pkg-instalar git'.
 
 NUEVO en 2.7 — el shebang ya no queda con /files doble:
   La 2.6 corregía los 113 scripts, pero con un error mío:
@@ -1101,7 +1248,7 @@ Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 2.7
+Terminal Ligera 2.8
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
 Sin bootstrap: corre /system/bin/sh como usuario

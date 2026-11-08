@@ -18,6 +18,46 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.8 — la ruta de Termux DENTRO de los scripts (fix 2.7)
+
+El shebang era solo la línea 1: el script `pkg` trae la ruta
+de com.termux **22 veces en el cuerpo** (`source` de
+`termux-setup-package-manager`, mirrors, `sources.list`,
+cache...) y hay **277 archivos de texto** con esa ruta
+(**6,191 apariciones** en total, verificado en el zip
+oficial del bootstrap). Por eso `pkg` seguía fallando aunque
+el shebang ya estaba bien.
+
+Cambio en la 2.8 (versionCode 10): nuevo
+`reescribirRutasEnTextos()` que reemplaza el prefijo en
+todos los textos del bootstrap (salta enlaces y binarios:
+si el archivo tiene un byte NUL no se toca, como `grep -I`),
+incluida la ruta de cache (`/data/data/com.termux/cache` ->
+cache de la app). Se corre en `instalar` y en `reparar`
+("rutas en textos: N reemplazos en M archivos").
+
+Además, para los binarios con el prefijo compilado (que
+`sed` no puede arreglar porque la ruta nueva es más larga):
+`DPKG_ADMINDIR` por variable de entorno (dpkg lo respeta) y
+un `apt.conf` propio en `$PREFIX/etc/apt/apt.conf` con
+todos los `Dir::` apuntando a nuestro prefijo, usado con
+`APT_CONFIG` (apt trae compilado `.../usr/lib`, el dir de
+methods).
+
+Lo que sigue sin estar resuelto: los `.deb` del repo traen
+sus propios scripts (postinst) con shebang de com.termux, y
+`apt`/`dpkg` los ejecutan tal cual al instalar. Si
+`pkg-instalar git` falla por eso, las opciones son: un
+bootstrap compilado con el prefijo propio
+(`TERMUX_APP_PACKAGE=com.nexos.terminal`, lo más limpio
+pero es un build grande con NDK) o extraer el `.deb` de git
+a mano. Cambiar el `applicationId` a `com.termux` NO es
+opción: David tiene Termux instalado y chocarían.
+
+Para probar: `reparar` (debe decir "rutas en textos" con
+miles de reemplazos y "apt.conf: listo"), luego
+`pkg-instalar git`, `git --version`.
+
 ## 2.7 — el shebang ya no queda con /files doble (fix 2.6)
 
 La 2.6 ya corregía los 113 scripts, pero mal: reemplazaba
@@ -274,6 +314,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.7: fix doble /files en shebangs"
+git commit -m "Terminal Ligera 2.8: reescribir ruta Termux en textos + DPKG_ADMINDIR + apt.conf"
 git push origin main
 ```

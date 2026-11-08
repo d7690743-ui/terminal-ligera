@@ -17,8 +17,8 @@ android {
         // compileSdk sigue en 35. No afecta a la instalación
         // por sideload (el piso de Android 14 es targetSdk 23).
         targetSdk 28
-        versionCode 8
-        versionName '2.6'
+        versionCode 9
+        versionName '2.7'
     }
 
     // Firma estable: una sola llave para todos los builds (2.3).

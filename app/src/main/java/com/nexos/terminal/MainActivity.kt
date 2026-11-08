@@ -85,6 +85,17 @@ import java.util.zip.ZipInputStream
  * y se saltaban todos. Ahora se usa Files.isSymbolicLink,
  * que solo mira el archivo mismo.
  *
+ * 2.7: fix al REEMPLAZO de la 2.6. La 2.6 ya corregía los
+ * 113, pero mal: reemplazaba "/data/data/com.termux" por la
+ * carpeta de la app, que YA termina en /files, así que el
+ * shebang quedaba ".../files/files/usr/bin/bash", una ruta
+ * que no existe -> "bad interpreter: No such file or
+ * directory" al correr pkg. Ahora el prefijo a reemplazar
+ * INCLUYE /files ("/data/data/com.termux/files") y además
+ * se repara el doble /files que dejó la 2.6 en los teléfonos
+ * que ya la instalaron. 'reparar' ahora verifica también
+ * que el intérprete del shebang de pkg exista de verdad.
+ *
  * 1.0: solo /system/bin/sh de Android, sin instalar nada.
  * 2.0: comando `instalar` baja el bootstrap oficial de Termux
  * (aarch64, ~32 MB, SHA-256 verificado) y lo descomprime en la
@@ -382,7 +393,7 @@ class MainActivity : Activity() {
 
     private fun estadoTexto(): String {
         val sb = StringBuilder()
-        sb.append("Estado Terminal Ligera 2.6\n")
+        sb.append("Estado Terminal Ligera 2.7\n")
         sb.append("  bootstrap: " + if (isBootstrapInstalled()) "instalado ($BOOTSTRAP_VERSION)" else "NO instalado (corre 'instalar')")
         sb.append("\n")
         sb.append("  carpeta: ${filesDir.absolutePath}\n")
@@ -525,8 +536,15 @@ class MainActivity : Activity() {
      * apunta a bash) y solo se tocan archivos de texto. */
     private fun reescribirShebangs(): Int {
         var corregidos = 0
-        val viejo = "/data/data/com.termux"
+        // OJO: el prefijo a reemplazar INCLUYE /files. La carpeta
+        // de la app (filesDir) YA termina en /files, así que
+        // reemplazar solo "/data/data/com.termux" duplicaba /files
+        // (bug de la 2.6: ".../files/files/usr/bin/bash", que no
+        // existe -> "bad interpreter: No such file or directory").
+        val viejo = "/data/data/com.termux/files"
         val nuevo = filesDir.absolutePath
+        // Lo que dejó roto la 2.6: el prefijo con /files doble.
+        val doble = nuevo + "/files"
         if (!prefixDir.exists()) return 0
         val pila = ArrayDeque<File>()
         pila.add(prefixDir)
@@ -547,11 +565,16 @@ class MainActivity : Activity() {
                 if (Files.isSymbolicLink(f.toPath())) continue
                 try {
                     val primera = f.bufferedReader(Charsets.UTF_8).use { it.readLine() } ?: continue
-                    if (!primera.startsWith("#!") || !primera.contains(viejo)) continue
+                    if (!primera.startsWith("#!")) continue
+                    var nueva = primera
+                    // 1. Arreglar el doble /files que dejó la 2.6.
+                    if (nueva.contains(doble)) nueva = nueva.replace(doble, nuevo)
+                    // 2. Reescribir el prefijo original de Termux.
+                    if (nueva.contains(viejo)) nueva = nueva.replace(viejo, nuevo)
+                    if (nueva == primera) continue
                     val contenido = f.readBytes()
                     val fin = contenido.indexOf(10.toByte())
                     if (fin < 0) continue
-                    val nueva = primera.replace(viejo, nuevo)
                     val salida = nueva.toByteArray(Charsets.UTF_8) + contenido.copyOfRange(fin, contenido.size)
                     f.writeBytes(salida)
                     corregidos++
@@ -720,6 +743,7 @@ class MainActivity : Activity() {
         sb.append("  enlaces creados: $enlaces\n")
         val shebangs = reescribirShebangs()
         sb.append("  shebangs corregidos: $shebangs\n")
+        sb.append("  shebang de pkg: " + verificarShebangPkg() + "\n")
         sb.append(
             "  enlace libreadline.so.8: " +
                 if (File(prefixDir, "lib/libreadline.so.8").exists()) "sí\n" else "NO\n"
@@ -732,6 +756,23 @@ class MainActivity : Activity() {
             else "[bash sigue sin ejecutarse. Prueba 'bash --version' y mándame el error exacto.]\n"
         )
         return sb.toString()
+    }
+
+    /** Lee la primera línea de pkg y verifica que el intérprete
+     *  de su shebang exista de verdad (así un reemplazo mal hecho
+     *  como el doble /files de la 2.6 no pasa desapercibido). */
+    private fun verificarShebangPkg(): String {
+        return try {
+            val pkg = File(prefixDir, "bin/pkg")
+            if (!pkg.exists()) return "NO (no hay bin/pkg)"
+            val primera = pkg.bufferedReader(Charsets.UTF_8).use { it.readLine() } ?: return "NO (vacío)"
+            if (!primera.startsWith("#!")) return "NO (sin shebang: $primera)"
+            val interprete = primera.removePrefix("#!").trim().split(" ", "\t")[0]
+            if (File(interprete).exists()) "OK ($interprete)"
+            else "MAL (no existe: $interprete)"
+        } catch (e: Exception) {
+            "NO (${e.message})"
+        }
     }
 
     /** Corre un comando corto con /system/bin/sh. Devuelve true si salió con 0. */
@@ -954,7 +995,7 @@ class MainActivity : Activity() {
 }
 
 private const val WELCOME = """
-Terminal Ligera 2.6 — por Nexos
+Terminal Ligera 2.7 — por Nexos
 Escribe 'help' para ver los comandos.
 Sin bootstrap, corre solo los comandos de Android.
 Con 'instalar' baja el bootstrap de Termux
@@ -979,6 +1020,17 @@ Comandos propios de esta app:
   estado         — dice si el bootstrap y muse están instalados
   acerca         — qué es esta terminal
   salir          — te dice cómo salir
+
+NUEVO en 2.7 — el shebang ya no queda con /files doble:
+  La 2.6 corregía los 113 scripts, pero con un error mío:
+  la carpeta de la app ya termina en /files, así que el
+  shebang quedaba ".../files/files/usr/bin/bash", que no
+  existe, y pkg seguía fallando ("No such file or
+  directory"). Ahora el reemplazo incluye /files y además
+  se arreglan los archivos que la 2.6 dejó con el doble
+  /files. Corre 'reparar' (debe decir "shebangs
+  corregidos: 113" aprox. y "shebang de pkg: OK") y luego
+  'pkg-instalar git'.
 
 NUEVO en 2.6 — ahora sí se corrigen los shebangs:
   La 2.5 decía "shebangs corregidos: 0" por un error mío:
@@ -1049,7 +1101,7 @@ Flechas ↑ ↓: recorren tu historial.
 """
 
 private const val ABOUT = """
-Terminal Ligera 2.6
+Terminal Ligera 2.7
 Paquete: com.nexos.terminal
 Hecha con Kotlin, sin librerías externas.
 Sin bootstrap: corre /system/bin/sh como usuario

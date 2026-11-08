@@ -18,6 +18,27 @@ Termux y así ya se le puede instalar `git` y probar Muse Code.
   un límite de 30 segundos, para que no se cuelgue la app.
 - Al girar el teléfono no se pierde lo escrito ni la carpeta actual.
 
+## 2.7 — el shebang ya no queda con /files doble (fix 2.6)
+
+La 2.6 ya corregía los 113 scripts, pero mal: reemplazaba
+`"/data/data/com.termux"` por la carpeta de la app, que YA
+termina en `/files`, así que el shebang quedaba
+`".../files/files/usr/bin/bash"`, una ruta que no existe, y
+`pkg-instalar git` seguía fallando con "bad interpreter: No
+such file or directory". Se encontró simulando el reemplazo
+exacto sobre el `pkg` real del bootstrap oficial.
+
+Cambio en la 2.7 (versionCode 9): el prefijo a reemplazar
+INCLUYE `/files` (`"/data/data/com.termux/files"`), y además
+se repara el doble `/files` que dejó la 2.6 en los teléfonos
+que ya la instalaron. `reparar` ahora verifica también que
+el intérprete del shebang de `pkg` exista de verdad
+("shebang de pkg: OK").
+
+Para probar: `reparar` (debe decir "shebangs corregidos:
+113" aprox. y "shebang de pkg: OK"), luego
+`pkg-instalar git`, `git --version`, `muse-instalar`.
+
 ## 2.6 — ahora sí se corrigen los shebangs (fix 2.5)
 
 La 2.5 decía "shebangs corregidos: 0" aunque había 113 scripts
@@ -253,6 +274,6 @@ Desde `~/code/terminal-ligera`, con los cambios de la 2.0:
 ```bash
 cd ~/code/terminal-ligera
 git add -A
-git commit -m "Terminal Ligera 2.6: fix detección de enlaces en shebangs"
+git commit -m "Terminal Ligera 2.7: fix doble /files en shebangs"
 git push origin main
 ```

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="terminal_bg">#000000</color>
+    <color name="bar_bg">#111111</color>
+    <color name="input_bg">#1A1A1A</color>
+    <color name="terminal_text">#E0E0E0</color>
+    <color name="terminal_green">#33FF66</color>
+</resources>
